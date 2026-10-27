@@ -758,3 +758,53 @@ Stage Summary:
 - mt5-bridge/.env.example         (BRIDGE_NAME + LOG_FILE الافتراضي)
 - mt5-bridge/bridge-guide.md      (عنوان + جدول + مخرجات + قسم جسور متعددة)
 - WORKLOG.md                      (هذا السجل)
+
+---
+Task ID: 30
+Agent: main (Z.ai)
+Task: تخصيص الحزمة لمسار MT5 الفعلي على جهاز المستخدم
+
+Work Log:
+- المستخدم زوّدنا بمسار MT5 الفعلي:
+  C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\22D22E9B393E16F638B440240FDD255D\MQL5\Experts
+- تحليل المسار:
+  • User: rd66
+  • MT5 instance ID: 22D22E9B393E16F638B440240FDD255D (hash فريد لكل تثبيت)
+  • المسار الكامل لـ Experts: MQL5\Experts\
+- التحقق من bridge.py: يبحث تلقائيًا في %APPDATA%\MetaQuotes\Terminal\Common\Files\
+  (وهو مسار مشترك بين كل نسخ MT5 — لا يحتاج تعديل)
+- التحقق من NexusTimeEA.mq5 و NexusCalendarEA.mq5: كلاهما يستخدم FILE_COMMON flag
+  فيكتبان تلقائيًا في Common\Files (متوافق مع bridge.py)
+- إنشاء INSTALL-RD66.md: دليل تثبيت مخصص لمسار MT5 على جهاز المستخدم
+  • تحليل المسار الكامل
+  • خطوات تثبيت EA الرفيقة في MQL5\Experts
+  • خطوات التحقق من كتابة server_time.json في Common\Files
+  • حل المشاكل الشائعة (EA لا يكتب، ZYSB لا يجد الملف، رمز غير موجود)
+  • جدول ملخص لكل المسارات المهمة
+- إنشاء install_eas.cmd: سكربت نسخ تلقائي للـ EAs إلى MT5\Experts
+  • يتحقق من وجود المسار
+  • ينسخ NexusTimeEA.mq5 + NexusCalendarEA.mq5
+  • يطبع خطوات MT5 التالية
+- إنشاء check_mt5.cmd: سكربت تشخيص شامل
+  • يفحص Python + الحزم + .env + MT5 + EAs + Common\Files + عملية MT5 + الاتصال
+  • يعرض كل الفحوصات في تقرير واحد
+- تحديث README-AR.md: إشارة إلى INSTALL-RD66.md
+- إعادة إنشاء B_Yemen_Smart.zip: 34KB، 13 ملفًا
+- نسخ INSTALL-RD66.md إلى المستودع (mt5-bridge/INSTALL-RD66.md) ليكون جزءًا من git
+
+Stage Summary:
+- ✅ حزمة مخصصة لمسار MT5 الفعلي على جهاز المستخدم
+- ✅ install_eas.cmd ينسخ EAs تلقائيًا للمسار الصحيح
+- ✅ check_mt5.cmd يفحص كل البيئة بنقرة واحدة
+- ✅ INSTALL-RD66.md دليل عربي كامل بالمسارات الفعلية
+- ✅ bridge.py و EAs متوافقون بالفعل (يستخدمون FILE_COMMON)
+- ⏳ بانتظار رفع INSTALL-RD66.md إلى GitHub
+
+الملفات المُعدّلة/الجديدة:
+- mt5-bridge/INSTALL-RD66.md         (جديد — نسخة المستودع)
+- WORKLOG.md                         (هذا السجل)
+
+الملفات الجديدة في حزمة B_Yemen_Smart فقط (غير مرفوعة لـ git):
+- B_Yemen_Smart/INSTALL-RD66.md
+- B_Yemen_Smart/install_eas.cmd
+- B_Yemen_Smart/check_mt5.cmd
