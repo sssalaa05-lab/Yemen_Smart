@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 ╔══════════════════════════════════════════════════════════════════════════╗
-║   NEXUS MT5 BRIDGE v3.0 — Yemen Smart Edition                           ║
+║   ZYSB — Yemen Smart Bridge v3.0                                        ║
 ║   جسر MetaTrader 5 ↔ نظام Yemen Smart                                  ║
+║   (ZYSB = Yemen Smart Bridge — يُميّزه عن الجسور الأخرى)                ║
 ║                                                                          ║
 ║   التحسينات عن v2.0:                                                    ║
 ║   ✦ كل الإعدادات من .env (لا hardcoded)                                ║
@@ -122,6 +123,10 @@ def _get_env_int(name: str, default: int) -> int:
         return default
 
 
+# ── اسم الجسر (للتمييز في السجلات والـ banner) ──
+# ZYSB = Yemen Smart Bridge — يُميّز هذا الجسر عن أي جسور أخرى على نفس الجهاز
+BRIDGE_NAME = _get_env("BRIDGE_NAME", "ZYSB")
+
 # ── إعدادات إلزامية ──
 NEXUS_URL = _get_env("NEXUS_URL", "").rstrip("/")
 BRIDGE_TOKEN = _get_env("NEXUS_BRIDGE_TOKEN", "")
@@ -187,7 +192,7 @@ RETRY_BACKOFF_SEC = _get_env_float("BRIDGE_RETRY_BACKOFF_SEC", 1.5)
 
 # التسجيل
 LOG_LEVEL = _get_env("BRIDGE_LOG_LEVEL", "INFO").upper()
-LOG_FILE = _get_env("BRIDGE_LOG_FILE", "nexus_bridge.log")
+LOG_FILE = _get_env("BRIDGE_LOG_FILE", f"{BRIDGE_NAME.lower()}.log")
 
 # ════════════════════════════════════════════════════════════════════════════
 #  التهيئة
@@ -195,18 +200,18 @@ LOG_FILE = _get_env("BRIDGE_LOG_FILE", "nexus_bridge.log")
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s | %(levelname)-7s | %(message)s",
+    format=f"%(asctime)s | %(levelname)-7s | [{BRIDGE_NAME}] | %(message)s",
     datefmt="%H:%M:%S",
     handlers=[
         logging.StreamHandler(sys.stdout),
         RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=3, encoding="utf-8"),
     ],
 )
-log = logging.getLogger("bridge")
+log = logging.getLogger(BRIDGE_NAME.lower())
 
 # طباعة لافتة البداية
 print("═" * 72)
-print("  NEXUS MT5 BRIDGE v3.0 — Yemen Smart Edition")
+print(f"  {BRIDGE_NAME} — Yemen Smart Bridge v3.0")
 print("═" * 72)
 print(f"  NEXUS_URL          = {NEXUS_URL}")
 print(f"  NEXUS_BRIDGE_TOKEN = {BRIDGE_TOKEN[:15]}{'*' * max(0, len(BRIDGE_TOKEN) - 15)}")
@@ -227,7 +232,8 @@ SESSION = requests.Session()
 SESSION.headers.update({
     "x-bridge-token": BRIDGE_TOKEN,
     "Content-Type": "application/json",
-    "User-Agent": "NexusBridge/3.0",
+    "User-Agent": f"{BRIDGE_NAME}/3.0",
+    "X-Bridge-Name": BRIDGE_NAME,
 })
 
 _state: dict[str, Any] = {
@@ -552,6 +558,7 @@ def send_heartbeat() -> bool:
 
     term = mt5.terminal_info()
     payload = {
+        "bridge_name": BRIDGE_NAME,
         "account": {
             "login": acc.login,
             "server": acc.server,
@@ -747,7 +754,7 @@ def send_calendar_if_changed() -> None:
 
 def main_loop():
     """حلقة واحدة متسلسلة — طلب HTTP واحد فقط في كل لحظة."""
-    log.info("═══ NEXUS MT5 BRIDGE v3.0 — Yemen Smart ═══")
+    log.info("═══ %s — Yemen Smart Bridge v3.0 ═══", BRIDGE_NAME)
     log.info("الخادم: %s", NEXUS_URL)
     log.info("الوضع: %s", "بيانات + تنفيذ ⚡" if EXECUTE else "بيانات فقط 📡")
     log.info("التردد: tick=%.0fs | bar=%.0fs | hb=%.0fs | decision=%.0fs | pos=%.0fs",

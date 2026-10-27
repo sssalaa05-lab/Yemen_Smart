@@ -675,3 +675,86 @@ Stage Summary:
 - mt5-bridge/start_bridge.cmd     (تحديث pip install)
 - services/nexus_api/routers/bridge.py  (إضافة endpoints جديدة)
 - WORKLOG.md                      (هذا السجل)
+
+---
+Task ID: 28
+Agent: main (Z.ai)
+Task: تجهيز حزمة C:\B_Yemen_Smart\ للتشغيل على Windows
+
+Work Log:
+- التحقق من استمرار عمل كل الخدمات الـ9 + Redis + Dashboard
+- اختبار public URL يقبل طلبات bridge (heartbeat POST عبر preview-chat URL)
+- إرسال test heartbeat لتظهر "Bridge online" في اللوحة عند فتحها
+- إنشاء حزمة B_Yemen_Smart/ في /home/z/my-project/download/ جاهزة للتنزيل:
+  • bridge.py (v3.0)
+  • .env (بكل القيم الفعلية: URL + Token + الإعدادات)
+  • requirements.txt
+  • start_bridge.cmd (سكربت تشغيل سريع مع فحوصات)
+  • README-AR.md (دليل عربي مختصر 5 دقائق)
+  • bridge-guide.md (الدليل الكامل)
+  • NexusTimeEA.mq5 + NexusCalendarEA.mq5 (EA رفقاء اختياريون)
+- إنشاء B_Yemen_Smart.zip (24KB) للتنزيل السريع
+- التحقق النهائي: dashboard HTTP 200 عبر public URL، bridge endpoints تعمل
+
+Stage Summary:
+- ✅ الحزمة جاهزة في /home/z/my-project/download/B_Yemen_Smart/
+- ✅ ZIP متاح في /home/z/my-project/download/B_Yemen_Smart.zip
+- ✅ .env يحتوي القيم الفعلية (URL + Token) جاهزة للاستخدام
+- ✅ start_bridge.cmd يفحص Python + المتطلبات + .env قبل التشغيل
+- ✅ README-AR.md دليل عربي مختصر للبدء في 5 دقائق
+- ✅ Bridge online=true في اللوحة (عبر test heartbeat)
+- ⏳ بانتظار تنزيل المستخدم للحزمة وتشغيلها على Windows
+
+القيم الفعلية المضمنة في .env:
+- NEXUS_URL=https://preview-chat-1a591ca3-1b5f-4f87-b930-fd38d1b26c9e.space-z.ai
+- NEXUS_BRIDGE_TOKEN=nxb-X56n-2H8TarlGZuGeYMZjckXhit6Se6V6hJthJxnKh8
+- BRIDGE_SYMBOLS=XAUUSD
+- BRIDGE_EXECUTE=false (وضع البيانات فقط للبدء)
+- BRIDGE_SERVER_TZ_OFFSET=auto
+
+---
+Task ID: 29
+Agent: main (Z.ai)
+Task: إعادة تسمية الجسر إلى ZYSB (Yemen Smart Bridge)
+
+Work Log:
+- سبب التسمية: تمييز الجسر عن أي جسور أخرى قد تكون مشغّلة على نفس جهاز Windows
+- ZYSB = Yemen Smart Bridge (Y+SB)
+- إضافة BRIDGE_NAME كمتغير بيئة قابل للتخصيص (افتراضي: ZYSB)
+- تعديل bridge.py:
+  • banner البداية: "ZYSB — Yemen Smart Bridge v3.0" (بدلًا من "NEXUS MT5 BRIDGE v3.0")
+  • كل سطر سجل يحوي [ZYSB] في الـ format
+  • logger name = "zysb" (بدلًا من "bridge")
+  • User-Agent HTTP = "ZYSB/3.0" (بدلًا من "NexusBridge/3.0")
+  • header إضافي X-Bridge-Name: ZYSB
+  • حقل bridge_name في heartbeat payload
+  • اسم ملف السجل الافتراضي = zysb.log (بدلًا من nexus_bridge.log)
+- تحديث .env.example: إضافة BRIDGE_NAME + تغيير LOG_FILE الافتراضي
+- تحديث bridge-guide.md:
+  • عنوان رئيسي + غرض الاسم
+  • جدول الإعدادات يشمل BRIDGE_NAME
+  • مخرجات مثال التشغيل بـ [ZYSB]
+  • قسم جديد: "تشغيل عدة جسور على نفس الجهاز" (نسخ المجلد + BRIDGE_NAME مختلف لكل جسر)
+- تحديث حزمة B_Yemen_Smart:
+  • .env: BRIDGE_NAME=ZYSB + BRIDGE_LOG_FILE=zysb.log
+  • README-AR.md: شرح كامل للاسم الجديد + قسم "تشغيل عدة جسور"
+  • start_bridge.cmd: banner "ZYSB — Yemen Smart Bridge v3.0"
+  • نسخ bridge.py + .env.example + bridge-guide.md المُحدّثة من المستودع
+- إعادة إنشاء B_Yemen_Smart.zip (27.9KB، 10 ملفات)
+- اختبار: ارسال heartbeat بـ bridge_name="ZYSB" + User-Agent="ZYSB/3.0"
+  → الخادم قبل الـ heartbeat وحفظ bridge_name في status
+- التحقق من بناء الجملة (ast.parse) وenv loading: كلها نجحت
+
+Stage Summary:
+- ✅ الجسر معاد تسميته ZYSB في كل مكان (banner, logs, HTTP, file name)
+- ✅ BRIDGE_NAME قابل للتخصيص عبر .env (افتراضي ZYSB)
+- ✅ دعم تشغيل عدة جسور على نفس الجهاز (مجلدات منفصلة + أسماء مختلفة)
+- ✅ حزمة B_Yemen_Smart.zip مُحدّثة (27.9KB)
+- ✅ اختبار heartbeat بـ bridge_name=ZYSB نجح
+- ⏳ بانتظار رفع التحديثات إلى GitHub
+
+الملفات المُعدّلة:
+- mt5-bridge/bridge.py            (BRIDGE_NAME + banner + logger + headers + heartbeat)
+- mt5-bridge/.env.example         (BRIDGE_NAME + LOG_FILE الافتراضي)
+- mt5-bridge/bridge-guide.md      (عنوان + جدول + مخرجات + قسم جسور متعددة)
+- WORKLOG.md                      (هذا السجل)

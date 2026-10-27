@@ -1,13 +1,15 @@
 # دليل تشغيل جسر MT5 v3.0 — خطوة بخطوة
 
-> **الإصدار:** v3.0 — Yemen Smart Edition  
-> **التغييرات الرئيسية:** كل الإعدادات من `.env`، قراءة تلقائية لـ `.env`، تنفيذ عبر API، إرسال حالة المراكز، إعادة محاولة محدودة، إعادة اتصال تلقائية.
+> **الاسم:** ZYSB (Yemen Smart Bridge) — v3.0  
+> **الغرض من الاسم:** تمييز هذا الجسر عن أي جسور أخرى قد تكون مشغّلة على نفس جهاز Windows (مثلاً جسور مشاريع أخرى).  
+> **التغييرات الرئيسية:** كل الإعدادات من `.env`، قراءة تلقائية لـ `.env`، تنفيذ عبر API، إرسال حالة المراكز، إعادة محاولة محدودة، إعادة اتصال تلقائية، اسم قابل للتخصيص `BRIDGE_NAME`.
 
 ## ما هذا؟
 
 `bridge.py` برنامج صغير يعمل على جهازك (ويندوز) بجانب منصة MetaTrader 5،
 ينقل **أسعار وسيطك الحقيقية اللحظية** إلى نظام Yemen Smart، ويمكنه (اختيارياً)
-**تنفيذ قرارات الوكلاء** في MT5 تلقائياً.
+**تنفيذ قرارات الوكلاء** في MT5 تلقائياً. يُسمى الجسر **ZYSB** (Yemen Smart Bridge)
+لتمييزه في السجلات وملفات الـ log عن أي جسور أخرى.
 
 ```
 جهازك (ويندوز)                        الخادم (Z.ai)
@@ -41,6 +43,7 @@
 
 | الإعداد | القيمة | ملاحظة |
 |---------|--------|--------|
+| `BRIDGE_NAME` | `ZYSB` (افتراضي) | اسم الجسر — يُميّزه في السجلات والـ banner. غيّره إن أردت اسمًا آخر |
 | `NEXUS_URL` | `https://preview-chat-<chat_id>.space-z.ai` | رابط المعاينة للجلسة الحالية على Z.ai — يتغير مع كل جلسة |
 | `NEXUS_BRIDGE_TOKEN` | `nxb-xxxxxxxxxxxxxxxx` | نفس `NEXUS_BRIDGE_TOKEN` في `.env` على الخادم |
 | `BRIDGE_SYMBOLS` | `XAUUSD` أو `XAUUSD:GOLD,BTCUSD` | الرموز المتداولة. إن كان اسم الوسيط مختلفًا استخدم صيغة `LOGICAL:broker` |
@@ -65,7 +68,7 @@ python bridge.py
 ستشاهد:
 ```
 ══════════════════════════════════════════════════════════════════════════
-  NEXUS MT5 BRIDGE v3.0 — Yemen Smart Edition
+  ZYSB — Yemen Smart Bridge v3.0
 ══════════════════════════════════════════════════════════════════════════
   NEXUS_URL          = https://preview-chat-abc-123.space-z.ai
   NEXUS_BRIDGE_TOKEN = nxb-X56n-2H8Tar...
@@ -76,12 +79,12 @@ python bridge.py
   TZ_OFFSET          = auto
 ══════════════════════════════════════════════════════════════════════════
 
-20:30:01 | INFO    | ═══ NEXUS MT5 BRIDGE v3.0 — Yemen Smart ═══
-20:30:01 | INFO    | ✅ متصل: حساب 12345 | broker-Demo | DEMO ✅ | رصيد 10000.00 USD
-20:30:01 | INFO    | ✅ إصدار الترمينال: 4385 | trade_allowed=True
-20:30:01 | INFO    | 📌 XAUUSD → XAUUSD (digits=2, point=0.01, spread=15 pts)
-20:30:01 | INFO    | 🌱 بذر 1500 شمعة لـ XAUUSD
-20:30:01 | INFO    | 📊 شمعة جديدة XAUUSD: close=2030.50 vol=135
+20:30:01 | INFO    | [ZYSB] | ═══ ZYSB — Yemen Smart Bridge v3.0 ═══
+20:30:01 | INFO    | [ZYSB] | ✅ متصل: حساب 12345 | broker-Demo | DEMO ✅ | رصيد 10000.00 USD
+20:30:01 | INFO    | [ZYSB] | ✅ إصدار الترمينال: 4385 | trade_allowed=True
+20:30:01 | INFO    | [ZYSB] | 📌 XAUUSD → XAUUSD (digits=2, point=0.01, spread=15 pts)
+20:30:01 | INFO    | [ZYSB] | 🌱 بذر 1500 شمعة لـ XAUUSD
+20:30:01 | INFO    | [ZYSB] | 📊 شمعة جديدة XAUUSD: close=2030.50 vol=135
 20:30:01 | INFO    | 🚀 بدء الحلقة الرئيسية (single-threaded)
 ```
 
@@ -163,3 +166,30 @@ python bridge.py
 عندما يعمل الجسر عندك وتريد أن يكون **مصدر البيانات الوحيد** (بدل Yahoo):
 على الخادم في `.env` غيّر `NEXUS_DATA_SYNTHETIC_FALLBACK=0` (لإيقاف البيانات الاصطناعية)، ثم أعِد تشغيل الأسطول.
 (قبل التبديل يعمل المصدران معًا — لا مشكلة للتجربة)
+
+## تشغيل عدة جسور على نفس الجهاز (متقدم)
+
+لو أردت تشغيل جسر ZYSB بجانب جسر آخر لمشروع مختلف على نفس جهاز Windows:
+
+1. انسخ مجلد `B_Yemen_Smart` إلى مجلد آخر (مثل `B_Other_Project`)
+2. في كل مجلد، عدّل `.env`:
+
+   ```
+   # في B_Yemen_Smart\.env
+   BRIDGE_NAME=ZYSB
+   BRIDGE_LOG_FILE=zysb.log
+   NEXUS_URL=https://preview-chat-<chat_id>.space-z.ai
+   NEXUS_BRIDGE_TOKEN=nxb-zysb-token-here
+
+   # في B_Other_Project\.env
+   BRIDGE_NAME=OTHER
+   BRIDGE_LOG_FILE=other.log
+   NEXUS_URL=https://other-server.com
+   NEXUS_BRIDGE_TOKEN=nxb-other-token-here
+   ```
+
+3. شغّل كل جسر في CMD منفصل
+4. كل سطر سجل سيحوي `[ZYSB]` أو `[OTHER]` للتمييز
+5. ملفات السجل منفصلة: `zysb.log` و `other.log`
+
+هذا يفيد المطورين الذين يشغّلون عدة مشاريع تداول على نفس جهاز Windows.
