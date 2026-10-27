@@ -30,6 +30,8 @@
 ║   BRIDGE_DECISION_POLL_SEC    (اختياري) 120.0                           ║
 ║   BRIDGE_CALENDAR_POLL_SEC    (اختياري) 300.0                           ║
 ║   BRIDGE_SEED_BARS            (اختياري) 1500                            ║
+║   BRIDGE_SKIP_SEED            (اختياري) true — تخطي البذر لتفادي 429   ║
+║   BRIDGE_REQUEST_DELAY_SEC    (اختياري) 2.0 — تأخير بين الطلبات        ║
 ║   BRIDGE_SERVER_TZ_OFFSET     (اختياري) auto                            ║
 ║   BRIDGE_LOG_LEVEL            (اختياري) INFO                             ║
 ║                                                                          ║
@@ -168,6 +170,10 @@ CALENDAR_POLL_SEC = _get_env_float("BRIDGE_CALENDAR_POLL_SEC", 300.0)
 SEED_BARS = _get_env_int("BRIDGE_SEED_BARS", 1500)
 POSITIONS_POLL_SEC = _get_env_float("BRIDGE_POSITIONS_POLL_SEC", 30.0)
 
+# ضبط 429 Too Many Requests (بوابة Z.ai تفرض حدودًا صارمة ~30-60 req/min)
+SKIP_SEED = _get_env_bool("BRIDGE_SKIP_SEED", True)  # default true for Z.ai preview
+REQUEST_DELAY_SEC = _get_env_float("BRIDGE_REQUEST_DELAY_SEC", 2.0)
+
 # التوقيت
 SERVER_TZ_OFFSET: Any = _get_env("BRIDGE_SERVER_TZ_OFFSET", "auto")
 DEFAULT_TZ_OFFSET_HOURS = 2.0
@@ -222,6 +228,7 @@ if EXECUTE:
     print(f"  LOT={LOT}  SL={SL_POINTS}pts  TP={TP_POINTS}pts  MIN_CONVICTION={MIN_CONVICTION}")
 print(f"  POLL: tick={POLL_TICKS_SEC}s  bar={POLL_BARS_SEC}s  hb={HEARTBEAT_SEC}s  "
       f"decision={DECISION_POLL_SEC}s  calendar={CALENDAR_POLL_SEC}s  positions={POSITIONS_POLL_SEC}s")
+print(f"  429: skip_seed={SKIP_SEED}  request_delay={REQUEST_DELAY_SEC}s")
 print(f"  TZ_OFFSET          = {SERVER_TZ_OFFSET}")
 if not _HAS_DOTENV:
     print("  ⚠️  python-dotenv غير مثبت — استخدم 'pip install python-dotenv' لقراءة .env تلقائيًا")
@@ -245,6 +252,7 @@ _state: dict[str, Any] = {
     "calendar_mtime": 0.0,
     "mt5_ready": False,
     "consecutive_errors": 0,
+    "consecutive_429": 0,
 }
 
 
@@ -263,10 +271,16 @@ def _post(path: str, payload: dict, retries: int | None = None) -> dict | None:
                 log.error("❌ التوكن مرفوض من الخادم — تحقق من NEXUS_BRIDGE_TOKEN")
                 return None
             if r.status_code == 429:
-                log.warning("⚠️  429 Too Many Requests — تخطى هذه الدورة")
+                # Exponential backoff: 30s, 60s, 120s, 240s
+                retry_count = _state.get("consecutive_429", 0)
+                backoff = min(30 * (2 ** retry_count), 300)  # cap at 5 min
+                _state["consecutive_429"] = retry_count + 1
+                log.warning("⚠️  429 Too Many Requests — انتظار %ds قبل المحاولة (محاولة #%d)", backoff, retry_count + 1)
+                time.sleep(backoff)
                 return None
             r.raise_for_status()
             _state["consecutive_errors"] = 0
+            _state["consecutive_429"] = 0  # نجاح → تصفير عدّاد 429
             return r.json()
         except requests.Timeout as exc:
             last_exc = exc
@@ -300,10 +314,16 @@ def _get(path: str, retries: int | None = None) -> dict | None:
             if r.status_code == 404:
                 return None
             if r.status_code == 429:
-                log.warning("⚠️  429 Too Many Requests — تخطى")
+                # Exponential backoff: 30s, 60s, 120s, 240s
+                retry_count = _state.get("consecutive_429", 0)
+                backoff = min(30 * (2 ** retry_count), 300)  # cap at 5 min
+                _state["consecutive_429"] = retry_count + 1
+                log.warning("⚠️  429 Too Many Requests — انتظار %ds قبل المحاولة (محاولة #%d)", backoff, retry_count + 1)
+                time.sleep(backoff)
                 return None
             r.raise_for_status()
             _state["consecutive_errors"] = 0
+            _state["consecutive_429"] = 0  # نجاح → تصفير عدّاد 429
             return r.json()
         except (requests.Timeout, requests.ConnectionError) as exc:
             if attempt < attempts:
@@ -765,13 +785,20 @@ def main_loop():
 
     resolve_tz_offset()
 
-    # بذر التاريخ لكل رمز
-    for logical, broker in SYMBOL_MAP.items():
-        seed_history(logical, broker)
+    # بذر التاريخ (اختياري — معطّل افتراضيًا لبوابة Z.ai لتفادي 429)
+    if not SKIP_SEED:
+        for logical, broker in SYMBOL_MAP.items():
+            seed_history(logical, broker)
+            time.sleep(REQUEST_DELAY_SEC)
+    else:
+        log.info("⏭️  تخطي seed_history (BRIDGE_SKIP_SEED=true) — النظام سيبني التاريخ من الـ ticks الحية")
 
-    # نبضة أولية
+    # نبضة أولية — مع تأخير بين الطلبات
+    time.sleep(REQUEST_DELAY_SEC)
     send_heartbeat()
+    time.sleep(REQUEST_DELAY_SEC)
     send_positions()
+    time.sleep(REQUEST_DELAY_SEC)
 
     # مؤشرات الوقت الأخيرة لكل حدث
     last_heartbeat = time.time()
@@ -797,12 +824,14 @@ def main_loop():
             for logical, broker in SYMBOL_MAP.items():
                 try:
                     send_tick(logical, broker)
+                    time.sleep(REQUEST_DELAY_SEC)  # تجنب 429
                 except Exception as exc:
                     log.warning("tick فشل: %s", exc)
 
             # 2) heartbeat — كل HEARTBEAT_SEC
             if now - last_heartbeat >= HEARTBEAT_SEC:
                 try:
+                    time.sleep(REQUEST_DELAY_SEC)  # تجنب 429
                     send_heartbeat()
                     last_heartbeat = now
                 except Exception as exc:
@@ -812,6 +841,7 @@ def main_loop():
             if now - last_bar_check >= POLL_BARS_SEC:
                 try:
                     for logical, broker in SYMBOL_MAP.items():
+                        time.sleep(REQUEST_DELAY_SEC)  # تجنب 429
                         send_bar_if_new(logical, broker)
                 except Exception as exc:
                     log.warning("bar check فشل: %s", exc)
@@ -820,6 +850,7 @@ def main_loop():
             # 4) positions — كل POSITIONS_POLL_SEC
             if now - last_positions >= POSITIONS_POLL_SEC:
                 try:
+                    time.sleep(REQUEST_DELAY_SEC)  # تجنب 429
                     send_positions()
                 except Exception as exc:
                     log.warning("positions فشل: %s", exc)
@@ -829,6 +860,7 @@ def main_loop():
             if now - last_decision >= DECISION_POLL_SEC:
                 try:
                     for logical in SYMBOL_MAP:
+                        time.sleep(REQUEST_DELAY_SEC)  # تجنب 429
                         poll_decision(logical)
                 except Exception as exc:
                     log.warning("decision poll فشل: %s", exc)
@@ -837,6 +869,7 @@ def main_loop():
             # 6) calendar — كل CALENDAR_POLL_SEC
             if now - last_calendar >= CALENDAR_POLL_SEC:
                 try:
+                    time.sleep(REQUEST_DELAY_SEC)  # تجنب 429
                     send_calendar_if_changed()
                 except Exception as exc:
                     log.warning("calendar فشل: %s", exc)
