@@ -17,20 +17,23 @@ interface FlowAgent {
   col: number;
 }
 
+// LLM model name — read from env at build time, defaults to GLM-4.5-Flash
+const LLM_MODEL = process.env.NEXT_PUBLIC_LLM_MODEL || 'glm-4.5-flash';
+
 const AGENTS: FlowAgent[] = [
-  { id: 'A11', name: 'Session Governor',    shortName: 'SESSION',    color: '#ffaa00', status: 'idle',  model: 'qwen2.5:0.5b',     layer: 0, col: 0 },
-  { id: 'A0',  name: 'Regime Analyst',      shortName: 'REGIME',     color: '#e040fb', status: 'idle',  model: 'qwen2.5:0.5b', layer: 1, col: 0 },
-  { id: 'A1',  name: 'Market Analyst',      shortName: 'MARKET',     color: '#00f5ff', status: 'idle',  model: 'qwen2.5:0.5b', layer: 2, col: 0 },
-  { id: 'A2',  name: 'News Sentinel',       shortName: 'NEWS',       color: '#ffd700', status: 'idle',  model: 'qwen2.5:0.5b',     layer: 2, col: 1 },
-  { id: 'A3',  name: 'Intermarket',         shortName: 'INTER',      color: '#ff6b35', status: 'idle',  model: 'qwen2.5:0.5b',     layer: 2, col: 2 },
-  { id: 'A4',  name: 'Order Flow',          shortName: 'FLOW',       color: '#ff1493', status: 'idle',  model: 'qwen2.5:0.5b',     layer: 2, col: 3 },
-  { id: 'A5',  name: 'Bull Researcher',     shortName: 'BULL',       color: '#39ff14', status: 'idle',  model: 'qwen2.5:0.5b',     layer: 3, col: 0 },
-  { id: 'A6',  name: 'Bear Researcher',     shortName: 'BEAR',       color: '#ff1744', status: 'idle',  model: 'qwen2.5:0.5b',     layer: 3, col: 1 },
-  { id: 'A7',  name: 'Arbitrator',          shortName: 'JUDGE',      color: '#bf40ff', status: 'idle',  model: 'qwen2.5:0.5b', layer: 4, col: 0 },
-  { id: 'A8',  name: 'Risk Manager',        shortName: 'RISK',       color: '#ff4444', status: 'idle',  model: 'qwen2.5:0.5b', layer: 5, col: 0 },
-  { id: 'A9',  name: 'Trade Executor',      shortName: 'EXEC',       color: '#00ff88', status: 'idle',  model: 'qwen2.5:0.5b',     layer: 6, col: 0 },
-  { id: 'A10', name: 'Position Manager',    shortName: 'POS MGR',    color: '#4488ff', status: 'idle',  model: 'qwen2.5:0.5b',     layer: 6, col: 1 },
-  { id: 'A12', name: 'Portfolio Strategist', shortName: 'PORTFOLIO',  color: '#aa44ff', status: 'idle',  model: 'qwen2.5:0.5b', layer: 7, col: 0 },
+  { id: 'A11', name: 'Session Governor',    shortName: 'SESSION',    color: '#ffaa00', status: 'idle',  model: LLM_MODEL,     layer: 0, col: 0 },
+  { id: 'A0',  name: 'Regime Analyst',      shortName: 'REGIME',     color: '#e040fb', status: 'idle',  model: LLM_MODEL, layer: 1, col: 0 },
+  { id: 'A1',  name: 'Market Analyst',      shortName: 'MARKET',     color: '#00f5ff', status: 'idle',  model: LLM_MODEL, layer: 2, col: 0 },
+  { id: 'A2',  name: 'News Sentinel',       shortName: 'NEWS',       color: '#ffd700', status: 'idle',  model: LLM_MODEL,     layer: 2, col: 1 },
+  { id: 'A3',  name: 'Intermarket',         shortName: 'INTER',      color: '#ff6b35', status: 'idle',  model: LLM_MODEL,     layer: 2, col: 2 },
+  { id: 'A4',  name: 'Order Flow',          shortName: 'FLOW',       color: '#ff1493', status: 'idle',  model: LLM_MODEL,     layer: 2, col: 3 },
+  { id: 'A5',  name: 'Bull Researcher',     shortName: 'BULL',       color: '#39ff14', status: 'idle',  model: LLM_MODEL,     layer: 3, col: 0 },
+  { id: 'A6',  name: 'Bear Researcher',     shortName: 'BEAR',       color: '#ff1744', status: 'idle',  model: LLM_MODEL,     layer: 3, col: 1 },
+  { id: 'A7',  name: 'Arbitrator',          shortName: 'JUDGE',      color: '#bf40ff', status: 'idle',  model: LLM_MODEL, layer: 4, col: 0 },
+  { id: 'A8',  name: 'Risk Manager',        shortName: 'RISK',       color: '#ff4444', status: 'idle',  model: LLM_MODEL, layer: 5, col: 0 },
+  { id: 'A9',  name: 'Trade Executor',      shortName: 'EXEC',       color: '#00ff88', status: 'idle',  model: LLM_MODEL,     layer: 6, col: 0 },
+  { id: 'A10', name: 'Position Manager',    shortName: 'POS MGR',    color: '#4488ff', status: 'idle',  model: LLM_MODEL,     layer: 6, col: 1 },
+  { id: 'A12', name: 'Portfolio Strategist', shortName: 'PORTFOLIO',  color: '#aa44ff', status: 'idle',  model: LLM_MODEL, layer: 7, col: 0 },
 ];
 
 interface FlowConnection {
@@ -396,7 +399,7 @@ export default function AgentFlowchart() {
                   <g>
                     <rect x={-10} y={NODE_H + 4} width={NODE_W + 20} height={44} rx={6} fill="rgba(10,10,15,0.95)" stroke={agent.color} strokeWidth={0.5} strokeOpacity={0.4} />
                     <text x={NODE_W / 2} y={NODE_H + 17} textAnchor="middle" className="text-[9px] font-mono" fill={agent.color}>{agent.name}</text>
-                    <text x={NODE_W / 2} y={NODE_H + 29} textAnchor="middle" className="text-[8px] font-mono" fill="rgba(152,152,176,0.6)">via Local LLM</text>
+                    <text x={NODE_W / 2} y={NODE_H + 29} textAnchor="middle" className="text-[8px] font-mono" fill="rgba(152,152,176,0.6)">via {LLM_MODEL}</text>
                     <text x={NODE_W / 2} y={NODE_H + 40} textAnchor="middle" className="text-[7px] font-mono" fill={cfg.dot}>
                       {agent.lastActivity ? `last: ${new Date(agent.lastActivity).toLocaleTimeString()}` : 'no activity'}
                     </text>
@@ -440,7 +443,7 @@ export default function AgentFlowchart() {
             <span className="text-[9px] font-mono uppercase" style={{ color: STATUS_CONFIG[st].text }}>{st === 'idle' ? 'ready' : st}</span>
           </div>
         ))}
-        <span className="ml-auto text-[9px] font-mono text-neon-purple">Powered by Local LLM (Ollama)</span>
+        <span className="ml-auto text-[9px] font-mono text-neon-purple">Powered by {LLM_MODEL} (Z.ai Cloud)</span>
       </div>
     </NeonCard>
   );

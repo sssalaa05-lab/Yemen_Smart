@@ -29,7 +29,8 @@ interface Settings {
 
 // AI provider options for the GenAI agents (live-switchable, no restart).
 const LLM_PROVIDERS: Array<{ value: string; label: string }> = [
-  { value: 'deepseek', label: 'DeepSeek (default)' },
+  { value: 'zai', label: 'Z.ai · GLM-4.5-Flash (default)' },
+  { value: 'deepseek', label: 'DeepSeek' },
   { value: 'openai', label: 'OpenAI · GPT' },
   { value: 'gemini', label: 'Google Gemini' },
   { value: 'local', label: 'Local · Ollama' },
