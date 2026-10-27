@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from typing import Any
 
@@ -17,6 +18,25 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_json(obj: Any) -> Any:
+    """Replace NaN/Inf floats with None so the response is valid JSON.
+
+    Python's json.dumps emits literal `NaN`/`Infinity` tokens by default,
+    which are NOT valid JSON and cause strict parsers (browsers, fetch())
+    to throw. FastAPI uses orjson which rejects them entirely → HTTP 500.
+    Walk the structure and replace any non-finite float with None.
+    """
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_json(v) for v in obj]
+    return obj
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 _AGENTS_URL = os.getenv("NEXUS_AGENTS_URL", "http://localhost:8004")
@@ -222,18 +242,18 @@ async def get_cross_asset():
         r = await _get_redis()
         raw = await r.get("nexus:cross_asset:summary")
         if raw:
-            return json.loads(raw)
+            return _sanitize_json(json.loads(raw))
         # Fallback: read individual keys
         dxy_raw = await r.get("nexus:cross_asset:DXY")
         us10y_raw = await r.get("nexus:cross_asset:US10Y")
-        return {
+        return _sanitize_json({
             "dxy": json.loads(dxy_raw) if dxy_raw else {"level": None, "source": "no_data"},
             "us10y": json.loads(us10y_raw) if us10y_raw else {"level": None, "source": "no_data"},
             "gold_yield_regime": "neutral",
             "gold_dxy_divergence": 0,
             "cross_asset_signal_pts": 3,
             "updated_at": None,
-        }
+        })
     except Exception:
         return {"error": "redis unavailable"}
 

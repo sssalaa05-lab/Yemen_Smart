@@ -1,14 +1,18 @@
-# دليل تشغيل جسر MT5 — خطوة بخطوة
+# دليل تشغيل جسر MT5 v3.0 — خطوة بخطوة
+
+> **الإصدار:** v3.0 — Yemen Smart Edition  
+> **التغييرات الرئيسية:** كل الإعدادات من `.env`، قراءة تلقائية لـ `.env`، تنفيذ عبر API، إرسال حالة المراكز، إعادة محاولة محدودة، إعادة اتصال تلقائية.
 
 ## ما هذا؟
+
 `bridge.py` برنامج صغير يعمل على جهازك (ويندوز) بجانب منصة MetaTrader 5،
-ينقل **أسعار وسيطك الحقيقية اللحظية** إلى نظام Nexus، ويمكنه (اختيارياً)
+ينقل **أسعار وسيطك الحقيقية اللحظية** إلى نظام Yemen Smart، ويمكنه (اختيارياً)
 **تنفيذ قرارات الوكلاء** في MT5 تلقائياً.
 
 ```
-جهازك (ويندوز)                        الخادم
+جهازك (ويندوز)                        الخادم (Z.ai)
 ┌──────────────────────┐              ┌─────────────────────────┐
-│  MT5 Terminal        │              │  Nexus (9 خدمات)        │
+│  MT5 Terminal        │              │  Yemen Smart            │
 │     ↕ bridge.py  ────┼── HTTPS ─────┼→  /api/v2/bridge/*      │
 │  (أسعار + تنفيذ)     │   توكن مشفر  │   → وكلاء → قرارات      │
 └──────────────────────┘              └─────────────────────────┘
@@ -18,54 +22,39 @@
 
 ## الخطوة 1 — تجهيز جهازك (مرة واحدة)
 
-1. ثبّت Python من python.org (خلال التثبيت علّم ✅ **Add Python to PATH**)
-2. افتح CMD واكتب:
+1. ثبّت Python 3.10+ من python.org (خلال التثبيت علّم ✅ **Add Python to PATH**)
+2. افتح CMD في مجلد `mt5-bridge/` واكتب:
    ```
-   pip install MetaTrader5 requests
+   pip install -r requirements.txt
    ```
+   هذا يثبّت: `MetaTrader5` + `requests` + `python-dotenv`
 3. افتح منصة MT5 وسجّل دخولك (حساب **Demo** للبداية)
-4. من القائمة: Tools → Options → Expert Advisors → فعّل ✅ **Allow algorithmic trading**
+4. من القائمة: **Tools → Options → Expert Advisors →** فعّل ✅ **Allow algorithmic trading**
 
-## الخطوة 2 — ضبط الإعدادات عبر متغيرات البيئة
-
-> ⚠️ **مهم**: الإعدادات تُقرأ من **متغيرات البيئة** (وليست hardcoded في الكود).
-> هذا يسمح بتغيير الرابط عند كل جلسة جديدة دون تعديل الكود.
-
-### الطريقة الأبسط: ملف `.env`
+## الخطوة 2 — ضبط الإعدادات عبر `.env`
 
 1. انسخ `.env.example` إلى `.env` في نفس مجلد `bridge.py`:
    ```cmd
    copy .env.example .env
    ```
-2. افتح `.env` بـ Notepad وعدّل القيمتين:
+2. افتح `.env` بـ Notepad وعدّل القيم الإلزامية:
 
 | الإعداد | القيمة | ملاحظة |
 |---------|--------|--------|
 | `NEXUS_URL` | `https://preview-chat-<chat_id>.space-z.ai` | رابط المعاينة للجلسة الحالية على Z.ai — يتغير مع كل جلسة |
 | `NEXUS_BRIDGE_TOKEN` | `nxb-xxxxxxxxxxxxxxxx` | نفس `NEXUS_BRIDGE_TOKEN` في `.env` على الخادم |
-| `SYMBOL_MAP` | (داخل bridge.py) | افتح Market Watch في MT5 وانظر الاسم الفعلي (XAUUSD أو GOLD أو XAUUSDm...) واكتبه مكان `"XAUUSD"` الثانية |
-| `SERVER_TZ_OFFSET_HOURS` | `"auto"` | يقيس فارق سيرفرك تلقائيًا |
-| `EXECUTE` | `False` | **اتركها False أولًا** — الجسر يرسل البيانات فقط |
+| `BRIDGE_SYMBOLS` | `XAUUSD` أو `XAUUSD:GOLD,BTCUSD` | الرموز المتداولة. إن كان اسم الوسيط مختلفًا استخدم صيغة `LOGICAL:broker` |
+| `BRIDGE_SERVER_TZ_OFFSET` | `auto` | يقيس فارق سيرفرك تلقائيًا — أو ضع رقمًا مثل `2.0` |
+| `BRIDGE_EXECUTE` | `false` | **اتركها false أولًا** — الجسر يرسل البيانات فقط |
 
-### الطريقة البديلة: متغيرات البيئة مباشرة
+### صيغة `BRIDGE_SYMBOLS`
 
-في CMD على ويندوز:
-```cmd
-set NEXUS_URL=https://preview-chat-d0892827-2907-4791-a397-f9ce9bb5fda4.space-z.ai
-set NEXUS_BRIDGE_TOKEN=nxb-56486951b9f72bb544ad
-python bridge.py
-```
-
-في PowerShell:
-```powershell
-$env:NEXUS_URL="https://preview-chat-d0892827-2907-4791-a397-f9ce9bb5fda4.space-z.ai"
-$env:NEXUS_BRIDGE_TOKEN="nxb-56486951b9f72bb544ad"
-python bridge.py
-```
-
-### أو شغّل بملف واحد: `start_bridge.cmd`
-
-ببساطة انقر مرتين على `start_bridge.cmd` — سيقرأ ملف `.env` تلقائيًا ويشغل الجسر.
+| القيمة | المعنى |
+|---|---|
+| `XAUUSD` | رمز واحد، الاسم المنطقي = اسم الوسيط |
+| `XAUUSD,BTCUSD` | رمزان، كل اسم منطقي = اسم الوسيط |
+| `XAUUSD:GOLD` | الاسم المنطقي `XAUUSD` لكن اسم الوسيط في MT5 هو `GOLD` |
+| `XAUUSD:GOLD,BTCUSD:BTCUSDm` | خليط |
 
 ## الخطوة 3 — التشغيل
 
@@ -75,80 +64,102 @@ python bridge.py
 
 ستشاهد:
 ```
-═══ NEXUS MT5 BRIDGE ═══
-✅ متصل: حساب 12345 | broker-Demo | DEMO ✅ | رصيد 10000.00 USD
-📌 XAUUSD → XAUUSD (digits=2, point=0.01)
-🌱 بذر 400 شمعة لـ XAUUSD
-📊 شمعة جديدة XAUUSD: close=4026.10 vol=135
+══════════════════════════════════════════════════════════════════════════
+  NEXUS MT5 BRIDGE v3.0 — Yemen Smart Edition
+══════════════════════════════════════════════════════════════════════════
+  NEXUS_URL          = https://preview-chat-abc-123.space-z.ai
+  NEXUS_BRIDGE_TOKEN = nxb-X56n-2H8Tar...
+  SYMBOLS            = ['XAUUSD']
+  EXECUTE            = False (via_api=True)
+  ALLOW_REAL_ACCOUNT = False
+  POLL: tick=5s  bar=60s  hb=60s  decision=120s  calendar=300s  positions=30s
+  TZ_OFFSET          = auto
+══════════════════════════════════════════════════════════════════════════
+
+20:30:01 | INFO    | ═══ NEXUS MT5 BRIDGE v3.0 — Yemen Smart ═══
+20:30:01 | INFO    | ✅ متصل: حساب 12345 | broker-Demo | DEMO ✅ | رصيد 10000.00 USD
+20:30:01 | INFO    | ✅ إصدار الترمينال: 4385 | trade_allowed=True
+20:30:01 | INFO    | 📌 XAUUSD → XAUUSD (digits=2, point=0.01, spread=15 pts)
+20:30:01 | INFO    | 🌱 بذر 1500 شمعة لـ XAUUSD
+20:30:01 | INFO    | 📊 شمعة جديدة XAUUSD: close=2030.50 vol=135
+20:30:01 | INFO    | 🚀 بدء الحلقة الرئيسية (single-threaded)
 ```
-اتركه يعمل. لتوقفه: Ctrl+C.
+
+اتركه يعمل. لتوقفه: `Ctrl+C`.
 
 ## الخطوة 4 — التحقق من طرف الخادم
 
-افتح لوحة Nexus → الشارت الحي سيبدأ بالتحرك مع **أسعار وسيطك** (أسرع
-وأدق من Yahoo)، وسيظهر آخر سعر مباشرة على الشارت.
+افتح لوحة Yemen Smart على نفس الـ URL:
+- الشارت الحي سيبدأ بالتحرك مع **أسعار وسيطك** (أسرع وأدق من Yahoo)
+- قسم **Positions** سيعرض المراكز المفتوحة في MT5 (إن وُجدت)
+- قسم **Bridge Status** سيعرض: حالة الاتصال، آخر نبضة، حالة زر Algo Trading
 
 ---
 
-## ماذا يرسل الجسر الآن؟ (بعد مراجعة وثائق MQL5 الرسمية)
+## ما الذي يُرسله الجسر؟
 
-| مصدر MQL5 | الحالة في الجسر |
-|-----------|-----------------|
-| **Series** — CopyRates (الشموع) | ✅ يعمل — ورفعنا الجودة: **real_volume** الحقيقي للعقود بدل tick_volume + سبريد كل شمعة |
-| **Market Information** — Terminal/Account/SymbolInfo | ✅ جديد — النبضة كل 30 ثانية ترسل: حالة **زر Algo Trading**، اتصال الوسيط والـping، الرصيد/الحقوق/الهامش/الرافعة، وتفاصيل كل رمز (السبريد الحالي، السواب، حدود اللوت) |
-| **Calendar** — التقويم الاقتصادي | ⚠️ دواله (CalendarValueHistory…) **بلغة MQL5 فقط** وحزمة بايثون لا تملكها. الجسر يحتوي خطافاً جاهزاً يقرأ ملف `calendar_dump.json` وينشره للخادم (يُفعّل لاحقاً بـ EA صغير رفيق). حتى ذلك الحين نظامك يغطي الأحداث عبر وكيل News Sentinel |
-| **Date & Time** — TimeCurrent / TimeGMT | ✅ جديد — الفارق بينهما هو إزاحة سيرفرك عن UTC: يقيسها الجسر **تلقائياً** (وضع `"auto"`) من أحدث tick، وبدقة 100% اختيارياً عبر EA رفيق `NexusTimeEA.mq5` |
+| البيانات | التردد | الـ Endpoint |
+|---|---|---|
+| **Ticks** (bid/ask) | كل 5 ثوان | `POST /api/v2/bridge/ticks` |
+| **Bars** M5 | كل دقيقة (فقط عند شمعة جديدة) | `POST /api/v2/bridge/bars` |
+| **Heartbeat** (account + terminal) | كل 60 ثانية | `POST /api/v2/bridge/heartbeat` |
+| **Positions** snapshot | كل 30 ثانية | `POST /api/v2/bridge/positions` |
+| **Decision poll** | كل 120 ثانية | `GET /api/agents/decision/{symbol}` |
+| **Calendar** (إن تغيّر الملف) | كل 5 دقائق | `POST /api/v2/bridge/calendar` |
+| **Seed history** (1500 شمعة) | مرة واحدة عند البداية | `POST /api/v2/bridge/bars` |
 
-ملاحظة تشخيصية مهمة: لو نسيت تفعيل زر Algo Trading وEXECUTE=True، الجسر يحذرك فوراً في اللوج
-(`🚨 trade_allowed=False`) قبل أن تفشل أي أمر.
+## التوقيت — تلقائي بالكامل
 
-## التوقيت — تلقائي بالكامل، بلا ضبط يدوي
+كل الشموع والـ ticks من MT5 تحمل **توقيت سيرفر الوسيط**، ونظام Yemen Smart يحتاج UTC. الجسر يحل هذا وحده:
 
-كل الشموع والتكس من MT5 تحمل **توقيت سيرفر الوسيط** (`TimeCurrent` في وثيقة
-MQL5 Date and Time)، ونظام Nexus يحتاج UTC. الجسر يحل هذا الآن وحده:
+1. **وضع `"auto"` (الافتراضي):** عند أول نشاط سوق يقيس الجسر الفارق من أحدث tick، ويعيد الفحص كل 30 دقيقة.
+2. **(اختياري) دقة 100% عبر EA رفيق `NexusTimeEA.mq5`** — يستخدم `TimeCurrent`/`TimeGMT` ويكتب الفارق في `server_time.json`.
 
-1. **وضع `"auto"` (الافتراضي):** عند أول نشاط سوق يقيس الجسر الفارق من أحدث
-   tick (وقت الـtick − UTC الآن)، ويعيد الفحص كل 30 دقيقة — فلو تبديل الوسيط
-   إلى/من التوقيت الصيفي يصحح نفسه بدون تدخلك. إذا كان السوق مغلقاً عند
-   التشغيل يستخدم 2.0 مؤقتاً ويصحح عند أول tick.
-2. **(اختياري) دقة 100% عبر EA رفيق — `NexusTimeEA.mq5`:** يستخدم دالتي
-   `TimeCurrent`/`TimeGMT` من الوثيقة نفسها ويكتب الفارق الدقيق في ملف:
-   - انسخ الملف إلى `MQL5\Experts` داخل بيانات الترمينال
-     (من MT5: File → Open Data Folder → MQL5 → Experts) ثم أعد فتح MT5
-   - اسحبه من Navigator على أي شارت واتركه
-   - سيكتب ملف `server_time.json` في مجلد Common\Files الخاص بالترمينال
-   - في `bridge.py` ضع المسار الكامل لهذا الملف في `SERVER_TIME_FILE`
-   - لا يتداول ولا يعدل شيئاً في منصتك — يكتب ملفاً فقط، ويعمل حتى لو
-     زر Algo Trading مطفأ
+ترتيب الأولوية: رقم ثابت في `BRIDGE_SERVER_TZ_OFFSET` > ملف EA الرفيق > قياس تلقائي > افتراضي 2.0.
 
-ترتيب الأولوية: رقم ثابت في الإعدادات > ملف EA الرفيق > قياس تلقائي > افتراضي 2.0.
-سترى الفارق المعتمد في لوج الجسر سطراً يبدأ بـ 🕒، وفي نبضة الحالة (`tz_offset_hours`).
+## تفعيل التنفيذ الفعلي (لاحقًا — بعد الثقة)
 
-## تفعيل التنفيذ الفعلي (لاحقاً — بعد الثقة)
+1. جرّب وضع البيانات أولًا يومين على الأقل ولاحظ قرارات الوكلاء
+2. عندما تقتنع: في `.env` ضع:
+   ```
+   BRIDGE_EXECUTE=true
+   BRIDGE_EXECUTE_VIA_API=true   # موصى به — التنفيذ عبر API الخادم
+   BRIDGE_LOT=0.01
+   BRIDGE_SL_POINTS=300
+   BRIDGE_TP_POINTS=600
+   BRIDGE_MIN_CONVICTION=65
+   ```
+3. **حماية مدمجة**: لو كان حسابك REAL سيرفض الجسر التنفيذ ما لم تجعل `BRIDGE_ALLOW_REAL_ACCOUNT=true` عمدًا
 
-1. جرّب وضع البيانات أولاً يومين على الأقل ولاحظ قرارات الوكلاء
-2. عندما تقتنع: في bridge.py غيّر `EXECUTE = True`
-3. اضبط `LOT = 0.01` و`SL_POINTS = 300` و`TP_POINTS = 600`
-4. **حماية مدمجة**: لو كان حسابك REAL سيرفض الجسر التنفيذ ما لم
-   تجعل `ALLOW_REAL_ACCOUNT = True` عمداً وواعياً
+### طريقتان للتنفيذ
+
+| الطريقة | الإعداد | الوصف |
+|---|---|---|
+| عبر API (موصى به) | `BRIDGE_EXECUTE_VIA_API=true` | الجسر يرسل طلب تنفيذ للخادم عبر `/api/v2/bridge/execute`. الخادم يسجّله للأرشفة. التنفيذ الفعلي لا يزال على الجسر لكن الخادم يراقب كل تنفيذ. |
+| مباشر (تقليدي) | `BRIDGE_EXECUTE_VIA_API=false` | الجسر يستدعي `mt5.order_send` مباشرة دون مرور الخادم. أسرع لكن بلا سجل مركزي. |
 
 ## أمان
+
 - كل رسالة موقعة بـ `x-bridge-token` — الخادم يرفض أي طلب بدون التوكن (401)
-- الجسر **يقرأ** الأسعار من MT5 ولا يعدل شيئاً في منصتك
+- الجسر **يقرأ** الأسعار من MT5 ولا يعدل شيئًا في منصتك (إلا عند تفعيل `EXECUTE=true`)
 - التنفيذ مقيّد: صفقة واحدة لكل رمز + حد أدنى للقناعة
+- الـ token يُمرّر في header (وليس في URL) — لا يظهر في سجلات الخادم
 
 ## أعطال شائعة
+
 | الرسالة | الحل |
 |---------|------|
-| `فشل الاتصال بالترمينال` | افتح MT5 وسجّل الدخول أولاً |
-| `الرمز XAUUSD غير موجود` | عدّل `SYMBOL_MAP` لاسم الوسيط الفعلي |
-| `التوكن مرفوض (401)` | تأكد أن BRIDGE_TOKEN في bridge.py يطابق الخادم |
-| `POST فشل: Timeout` | تحقق من الإنترنت — الجسر يعيد المحاولة تلقائياً |
-| الشموع متقدمة/متأخرة ساعات عن السوق الحقيقي | اترك `SERVER_TZ_OFFSET_HOURS="auto"` — سيقيس الفارق عند أول tick نشط، أو ضع الرقم يدوياً |
-| الشارت لا يتحرك | تأكد أن الخادم على وضع bridge (انظر أدناه) |
+| `فشل initialize()` | افتح MT5 وسجّل الدخول أولًا |
+| `الرمز XAUUSD غير موجود` | عدّل `BRIDGE_SYMBOLS` لاسم الوسيط الفعلي (مثل `XAUUSD:GOLD`) |
+| `التوكن مرفوض (401)` | تأكد أن `NEXUS_BRIDGE_TOKEN` في `.env` يطابق الخادم |
+| `POST فشل: Timeout` | تحقق من الإنترنت — الجسر يعيد المحاولة تلقائيًا (مرتان) |
+| `429 Too Many Requests` | زِد قيم `BRIDGE_POLL_*_SEC` في `.env` |
+| `trade_allowed=False` | فعّل زر Algo Trading في MT5 (Tools → Options → Expert Advisors) |
+| `انقطع اتصال MT5` | الجسر يعيد التهيئة تلقائيًا. إن استمر، أعد تشغيل MT5 |
+| الشموع متقدمة/متأخرة ساعات | اترك `BRIDGE_SERVER_TZ_OFFSET=auto` — سيقيس الفارق عند أول tick |
 
 ## تبديل الخادم إلى وضع الجسر
+
 عندما يعمل الجسر عندك وتريد أن يكون **مصدر البيانات الوحيد** (بدل Yahoo):
-على الخادم في `.env` غيّر `NEXUS_DATA_SOURCE=yahoo` إلى
-`NEXUS_DATA_SOURCE=bridge` ثم أعِد تشغيل الأسطول.
-(قبل التبديل يعمل المصدران معاً — لا مشكلة للتجربة)
+على الخادم في `.env` غيّر `NEXUS_DATA_SYNTHETIC_FALLBACK=0` (لإيقاف البيانات الاصطناعية)، ثم أعِد تشغيل الأسطول.
+(قبل التبديل يعمل المصدران معًا — لا مشكلة للتجربة)

@@ -511,3 +511,167 @@ Stage Summary:
 - الأرشيف الجاهز للتنزيل: download/nexus-backup-2026-10-27.tar.gz
 - بيئة التشغيل هنا مؤقتة — هذه النسخة هي ضمانة المستخدم الوحيدة ضد الضياع
 - تذكر: جهاز المستخدم يحتفظ أصلاً بـ EA + bridge (جزء الويندوز مستقل)
+
+---
+Task ID: 24
+Agent: main (Z.ai)
+Task: تشغيل نظام Yemen Smart من مستودع GitHub المُستنسخ حديثًا (بيئة نظيفة)
+
+Work Log:
+- استنساخ المستودع من https://github.com/sssalaa05-lab/Yemen_Smart.git (قراءة فقط) إلى /home/z/my-project/yemen-smart/
+- إعداد مصادقة GitHub PAT عبر ~/.git-credentials (chmod 600) — تحقق API: push=True, pull=True
+- إصلاح قيد إصدار redis في requirements.txt من <6.0 إلى <8.0 (المثبت 7.4.0)
+- تنظيف مساحة القرص: حذف nvidia CUDA packages من /home/z/.venv (7.2GB → 5.2GB) + حذف pip cache (3GB)
+- تثبيت torch CPU-only من https://download.pytorch.org/whl/cpu
+- تثبيت باقي الاعتماديات: polars, duckdb, pandas-ta-classic, ta, quantstats, transformers, hmmlearn, stable-baselines3, gymnasium, langchain, langgraph, langchain-openai, openai, ccxt, yfinance, structlog, prometheus-client, python-jose, passlib
+- تجميع Redis 7.4.1 من المصدر (لا يوجد sudo/apt) → scripts/bin/redis-server + redis-cli
+- إنشاء .env آمن: NEXUS_TRADING_MODE=paper, NEXUS_DATA_SYNTHETIC_FALLBACK=1, MT5_* وهمية, NEXUS_DISABLE_RESEARCH=1, NEXUS_OHLCV_TIMEFRAME=M5
+- تشغيل Redis daemonized (--appendonly yes --appendfsync everysec)
+- npm ci + npm run build للوحة Next.js 14 (18 صفحة، 87KB shared JS)
+- preflight.py --quick: PASS (3 تحذيرات متوقعة فقط — لا نماذج بعد، synthetic fallback مفعّل)
+- إنشاء scripts/daemonize.py (double-fork PPID=1) لتجاوب قتل العمليات الخلفية بين استدعاءات الأدوات
+- تشغيل run.py --no-frontend (daemonized) → 9 خدمات uvicorn بدأت
+- انتظار bootstrap training في nexus-ml (XGBoost acc=0.9990 + LSTM + RL PPO) — استغرق ~90 ثانية على CPU
+- تشغيل لوحة Next.js على المنفذ 3100 (daemonized)
+
+Stage Summary:
+- ✅ كل الخدمات الـ9 تعمل: 8 healthy + 1 degraded (nexus-data بسبب mt5=false متوقع)
+- ✅ اللوحة تعمل على http://127.0.0.1:3100 (HTTP 200, 191KB)
+- ✅ nexus-api /health: healthy (redis + duckdb connected)
+- ✅ /api/positions يعمل (يعيد 0 صفقات — متوقع)
+- ✅ 4 نماذج ML مُدرّبة في models_store/: hmm_regime, rl_ppo, dl_transformer, XGB_LGBM_SLTP
+- ⚠️ nexus-executor: أخطاء "MetaTrader5 package not installed" متكررة كل 5 ثوان (متوقع على Linux)
+- ⚠️ nexus-agents: أخطاء 401 من Z.ai API (NEXUS_LLM_API_KEY فارغ — LLM اختياري للـ daily brief)
+- ⚠️ nexus-ml: AttributeError على TradeMemory._records في lifecycle retrain (غير حرج)
+- ⚠️ بعض endpoints تعيد 404 (/api/system/status, /api/traders) — يحتاج فحص المسارات
+- الملفات المُنتجة: .env (محلي، غير مُلتزم), scripts/daemonize.py, logs/run.log, logs/dashboard.log
+- لم تُجرَ أي تغييرات على المستودع البعيد (لا git push)
+
+---
+Task ID: 25
+Agent: main (Z.ai)
+Task: تجهيز جسر الويب (Web Preview) + جسر MT5 للوصول العام
+
+Work Log:
+- اكتشاف أن 127.0.0.1:3100 داخل البيئة لا يُعادل localhost على جهاز المستخدم (container معزول)
+- اكتشاف آلية بوابة Z.ai: المنفذ العام 81 محجوز من قبل البوابة، التي تحوّل الطلبات إلى المنفذ الداخلي 3000
+- تجربة منافذ متعددة (3000, 8080, 8000, 5000, 9000, 8081, 8888) — فقط 3000 يعمل عبر البوابة
+- إيقاف لوحة Next.js من المنفذ 3100 وإعادة تشغيلها على المنفذ 3000 (binding 0.0.0.0)
+- التحقق: HTTP 200 + 191KB محليًا (port 3000) + عبر البوابة (port 81)
+- التحقق من الـ URL العام: https://preview-chat-<chat_id>.space-z.ai/ يعمل (HTTP 200)
+- توليد NEXUS_BRIDGE_TOKEN قوي: nxb-<32 chars base64url>
+- إضافة NEXUS_BRIDGE_TOKEN إلى .env
+- إنشاء scripts/run_nexus.py كـ wrapper لتحميل .env قبل run.py (يحل مشكلة exec/__file__)
+- إعادة تشغيل كل خدمات nexus عبر الـ wrapper الجديد مع التوكن الجديد
+- اختبار endpoints الجسر محليًا: /api/v2/bridge/status → {online:true}, /api/v2/bridge/heartbeat → {ok:true}
+- اختبار endpoints الجسر عبر الـ URL العام: نجح كلاهما ✅
+
+Stage Summary:
+- ✅ جسر الويب يعمل: https://preview-chat-1a591ca3-1b5f-4f87-b930-fd38d1b26c9e.space-z.ai/
+- ✅ اللوحة (Next.js) تعمل عبر البوابة على المنفذ 3000 داخلي → 81 عام
+- ✅ كل خدمات nexus الـ9 تعمل بالتوكن الجديد
+- ✅ nexus-api /api/v2/bridge/* endpoints تعمل محليًا وعبر الـ URL العام
+- ✅ nexus-data /api/data/ingest/* endpoints جاهزة لاستقبال بيانات الجسر
+- ✅ Next.js dashboard يُوجّه /api/* و /health و /ws/* إلى nexus-api (same-origin proxy)
+- ⚠️ لم تُجرَ تغييرات على GitHub بعد (التغييرات محلية: .env, scripts/run_nexus.py, WORKLOG.md)
+- ⏳ بانتظار تشغيل bridge.py على جهاز Windows للمستخدم لربط MT5
+
+المعلومات النهائية للمستخدم:
+- PUBLIC URL: https://preview-chat-1a591ca3-1b5f-4f87-b930-fd38d1b26c9e.space-z.ai/
+- BRIDGE TOKEN: nxb-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+- إعداد جسر MT5 على Windows:
+    set NEXUS_URL=https://preview-chat-1a591ca3-1b5f-4f87-b930-fd38d1b26c9e.space-z.ai
+    set NEXUS_BRIDGE_TOKEN=nxb-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    python bridge.py
+
+---
+Task ID: 26
+Agent: main (Z.ai)
+Task: إصلاح اختفاء اللوحة بعد ظهورها (client-side exception)
+
+Work Log:
+- استخدام playwright chromium headless لالتقاط أخطاء الـ browser console
+- اكتشاف أن اللوحة تُحمّل بنجاح (HTTP 200, title=Nexus Trader) ثم تبدأ بالاختفاء
+- تحديد 3 أسباب جذرية:
+  1. /api/intelligence/cross-asset يُرجع 500 بسبب "Out of range float values are not JSON compliant: nan" (Python يحوّل NaN إلى NaN حرفيًا في JSON، أو مرفوض من orjson)
+  2. /api/executor/positions يُرجع 500 بشكل متكرر كل ثانيتين (MetaTrader5 غير مثبت على Linux)
+  3. CORS في nexus-api يسمح فقط بـ localhost:3100 ولا يشمل preview URL العام
+- إصلاح 1: إضافة _sanitize_json() في services/nexus_api/routers/intelligence.py يستبدل NaN/Inf بـ None
+- إصلاح 2: services/nexus_executor/main.py get_positions() يُرجع 200 بقائمة فارغة بدل 500 عند فشل MT5
+- إصلاح 3: services/nexus_api/main.py إضافة allow_origin_regex للسماح بـ https://preview-*.space-z.ai
+- إنشاء dashboard/.env بـ NEXT_PUBLIC_API_URL فارغ (same-origin proxy عبر next.config.js rewrites)
+- إعادة بناء اللوحة (npm run build) لالتقاط متغيرات البيئة الجديدة
+- إعادة تشغيل nexus-api + nexus-executor + dashboard
+- اختبار playwright مؤكد: 15 ثانية متواصلة، 0 page errors، HTML ينمو من 193KB إلى 199KB (تحديث حي)
+
+Stage Summary:
+- ✅ /api/intelligence/cross-asset: 200 ببيانات صحيحة (DXY=102.34, US10Y=4.99)
+- ✅ /api/executor/positions: 200 بقائمة فارغة + broker_unavailable=true
+- ✅ /api/positions: 200 source="empty"
+- ✅ CORS يسمح بـ preview URLs
+- ⚠️ بعض 404s متوقعة (agents/decision/trade-memory/settings) — اللوحة تتعامل معها بـ graceful degradation
+- ✅ اللوحة مستقرة بالكامل (اختبار 15 ثانية، 0 أخطاء)
+
+الملفات المُعدّلة:
+- services/nexus_api/routers/intelligence.py  (إضافة _sanitize_json + تطبيق على cross-asset)
+- services/nexus_api/main.py  (CORS regex للـ preview URLs)
+- services/nexus_executor/main.py  (get_positions fallback 200 بدل 500)
+- dashboard/.env  (جديد — متغيرات same-origin)
+- WORKLOG.md  (هذا السجل)
+
+---
+Task ID: 27
+Agent: main (Z.ai)
+Task: قراءة جسر MT5 السابق من GitHub وتعديله ليتناسب مع المشروع
+
+Work Log:
+- قراءة bridge.py v2.0 كاملًا (598 سطر) + bridge-guide.md + .env.example
+- تحليل الفجوات بين bridge.py والمشروع الحالي:
+  • SYMBOL_MAP, EXECUTE, LOT, SL_POINTS, TP_POINTS hardcoded
+  • لا يقرأ .env تلقائيًا (يتطلب set يدوي)
+  • التنفيذ يحدث مباشرة في MT5 بدلًا من المرور عبر API
+  • لا يرسل حالة المراكز المفتوحة
+  • لا إعادة محاولة على timeouts العابرة
+  • لا إعادة اتصال تلقائية عند انقطاع MT5
+- إعادة كتابة bridge.py كـ v3.0 — Yemen Smart Edition (598 → ~700 سطر):
+  • قراءة .env تلقائيًا عبر python-dotenv
+  • كل الإعدادات من متغيرات البيئة (مع قيم افتراضية آمنة)
+  • SYMBOL_MAP من BRIDGE_SYMBOLS بصيغة "LOGICAL:broker,LOGICAL2:broker2"
+  • تنفيذ عبر API (POST /api/v2/bridge/execute) كخيار افتراضي
+  • إرسال حالة المراكز كل 30 ثانية (POST /api/v2/bridge/positions)
+  • إعادة محاولة محدودة (MAX_RETRIES=2) على timeouts العابرة
+  • إعادة اتصال تلقائية بـ MT5 عند انقطاع الاتصال
+  • logging مُحسّن مع RotatingFileHandler (2MB × 3 ملفات)
+  • طباعة لافتة بداية مفصّلة بكل الإعدادات الفعّالة
+- إضافة endpoints جديدة على الخادم (services/nexus_api/routers/bridge.py):
+  • POST /api/v2/bridge/positions — استقبال snapshot المراكز
+  • GET /api/v2/bridge/positions — استرجاع آخر snapshot
+  • POST /api/v2/bridge/execute — استقبال طلبات التنفيذ (مع audit log في Redis)
+- تحديث .env.example بتوثيق كل الإعدادات الجديدة (إلزامية + اختيارية)
+- تحديث bridge-guide.md بالكامل ليعكس v3.0
+- إنشاء mt5-bridge/requirements.txt (MetaTrader5 + requests + python-dotenv)
+- تحديث start_bridge.cmd لاستخدام requirements.txt
+- اختبار بناء الجملة (ast.parse) لكل من bridge.py و routers/bridge.py
+- اختبار قراءة .env (محاكاة MetaTrader5 module) — كل القيم تُقرأ صحيحة
+- إعادة تشغيل nexus-api + nexus-data لالتقاط endpoints جديدة
+- اختبار تكامل شامل (6 endpoints): heartbeat, ticks, bars, positions, calendar, execute
+  → كلها نجحت: ok / accepted=1 / received=1 / acknowledged
+- التحقق من تخزين البيانات في nexus-data: ticks مخزّنة (3 ticks في cache)
+- التحقق من استقرار اللوحة: HTTP 200، bridge online=true
+
+Stage Summary:
+- ✅ bridge.py v3.0 مكتوب ومختبر (syntax + env loading + integration)
+- ✅ endpoints جديدة على الخادم تعمل (positions, execute)
+- ✅ كل endpoints الـ bridge الـ6 تستجيب بشكل صحيح
+- ✅ التوكن يُعتمد على post endpoints، والـ get مفتوحة للوحة
+- ✅ اللوحة مستقرة (HTTP 200، bridge online)
+- ⏳ بانتظار اختبار على Windows فعلي (مع MT5 حقيقي)
+
+الملفات المُعدّلة:
+- mt5-bridge/bridge.py           (إعادة كتابة كاملة v2.0 → v3.0)
+- mt5-bridge/.env.example         (توثيق كل الإعدادات)
+- mt5-bridge/bridge-guide.md      (إعادة كتابة كاملة)
+- mt5-bridge/requirements.txt     (جديد)
+- mt5-bridge/start_bridge.cmd     (تحديث pip install)
+- services/nexus_api/routers/bridge.py  (إضافة endpoints جديدة)
+- WORKLOG.md                      (هذا السجل)

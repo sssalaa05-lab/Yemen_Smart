@@ -1053,5 +1053,19 @@ async def get_positions(nexus_only: bool = False):
             },
         }
     except Exception as exc:
-        log.exception("executor.get_positions.error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        # When MT5 is unavailable (Linux dev, bridge offline, etc.), return
+        # an empty 200 instead of 500 so the dashboard can render normally.
+        # The dashboard treats 500 as a hard failure and may flash/disappear.
+        log.warning("executor.get_positions.fallback", error=str(exc))
+        return {
+            "positions": [],
+            "nexus_positions": [],
+            "external_positions": [],
+            "count": 0,
+            "nexus_count": 0,
+            "external_count": 0,
+            "total_count": 0,
+            "account": None,
+            "broker_unavailable": True,
+            "error": str(exc),
+        }

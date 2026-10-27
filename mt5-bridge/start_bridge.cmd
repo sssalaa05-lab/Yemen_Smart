@@ -62,7 +62,14 @@ REM التحقق من مكتبة MetaTrader5
 python -c "import MetaTrader5" >nul 2>&1
 if errorlevel 1 (
     echo ⚠️  مكتبة MetaTrader5 غير مثبتة — جاري التثبيت...
-    pip install MetaTrader5 requests
+    pip install -r requirements.txt
+) else (
+    REM تأكد من بقية المتطلبات
+    python -c "import requests, dotenv" >nul 2>&1
+    if errorlevel 1 (
+        echo ⚠️  بعض المتطلبات ناقصة — جاري التثبيت...
+        pip install -r requirements.txt
+    )
 )
 
 echo ═══════════════════════════════════════════════════════════════════════════

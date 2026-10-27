@@ -6,6 +6,7 @@ heartbeat store, status read). The decision poll reuses the existing
 """
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -81,6 +82,92 @@ async def heartbeat(request: Request) -> dict[str, Any]:
     payload = {**body, "ts": datetime.now(timezone.utc).isoformat()}
     await _redis.cache_set(_BRIDGE_STATUS_KEY, payload, ttl_sec=180)
     return {"ok": True}
+
+
+@router.post("/positions")
+async def ingest_positions(request: Request) -> dict[str, Any]:
+    """Receive open positions snapshot from the bridge.
+
+    The bridge polls MT5 every BRIDGE_POSITIONS_POLL_SEC and POSTs the full
+    list (empty array if no positions) so the dashboard can display
+    broker-side reality alongside internal nexus records.
+    """
+    _auth(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    positions = body.get("positions", [])
+    payload = {
+        "positions": positions,
+        "count": len(positions),
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    # Cache the latest snapshot (TTL slightly longer than the bridge's poll)
+    await _redis.cache_set("nexus:bridge:positions", payload, ttl_sec=120)
+    return {"ok": True, "received": len(positions)}
+
+
+@router.get("/positions")
+async def get_positions_snapshot() -> dict[str, Any]:
+    """Return the latest bridge-reported positions snapshot."""
+    raw = await _redis.cache_get("nexus:bridge:positions")
+    if not isinstance(raw, dict):
+        return {"positions": [], "count": 0, "stale": True}
+    return raw
+
+
+@router.post("/execute")
+async def request_execute(request: Request) -> dict[str, Any]:
+    """Bridge signals a decision it wants the system to execute.
+
+    In EXECUTE_VIA_API=true mode, the bridge POSTs the agent decision here
+    instead of calling mt5.order_send directly. The system records the
+    request (so the dashboard can show pending actions) and returns an ack.
+    Actual order routing to MT5 still happens on the bridge side — this
+    endpoint just centralizes the audit trail.
+
+    Future: a background consumer could relay approved executes back to the
+    bridge via a Redis stream, so the bridge becomes a pure executor.
+    """
+    _auth(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    # Required fields
+    required = ("symbol", "verdict", "conviction")
+    missing = [k for k in required if k not in body]
+    if missing:
+        raise HTTPException(400, f"missing fields: {missing}")
+
+    # Append to a Redis list for audit (cap at 1000 entries)
+    audit_entry = {
+        **body,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "status": "received",
+    }
+    try:
+        # Use the raw redis client to push to a list
+        raw_redis = _redis._redis if hasattr(_redis, "_redis") else None
+        if raw_redis is not None:
+            await raw_redis.lpush("nexus:bridge:execute_log", json.dumps(audit_entry))
+            await raw_redis.ltrim("nexus:bridge:execute_log", 0, 999)
+    except Exception:
+        pass  # audit is best-effort
+
+    return {
+        "ok": True,
+        "acknowledged": True,
+        "symbol": body["symbol"],
+        "verdict": body["verdict"],
+        "conviction": body["conviction"],
+    }
 
 
 @router.get("/status")

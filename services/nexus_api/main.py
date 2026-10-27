@@ -146,9 +146,25 @@ app = FastAPI(
 
 DASHBOARD_ORIGIN = os.getenv("DASHBOARD_ORIGIN", "http://localhost:3100")
 
+# Build CORS allow_origins list. Always include the localhost dev origins plus
+# the configured DASHBOARD_ORIGIN. Additionally, allow any Z.ai preview URL
+# (https://preview-*.space-z.ai) so the dashboard is reachable from the
+# platform's public preview gateway when running inside the Z.ai container.
+_default_origins = [
+    DASHBOARD_ORIGIN,
+    "http://localhost:3100",
+    "http://127.0.0.1:3100",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+# Allow any https://preview-*.space-z.ai origin (Z.ai platform preview URLs).
+# FastAPI/CORSMiddleware supports regex origins via `allow_origin_regex`.
+_PREVIEW_ORIGIN_REGEX = r"^https://preview-[\w-]+\.space-z\.ai$"
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[DASHBOARD_ORIGIN, "http://localhost:3100", "http://127.0.0.1:3100"],
+    allow_origins=_default_origins,
+    allow_origin_regex=_PREVIEW_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
