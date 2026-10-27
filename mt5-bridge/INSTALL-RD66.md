@@ -22,7 +22,7 @@ C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\22D22E9B393E16F638B440240FDD25
 
 ```
 C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\22D22E9B393E16F638B440240FDD255D\MQL5\
-├── Experts\         ← ضع هنا: NexusTimeEA.mq5, NexusCalendarEA.mq5
+├── Experts\         ← ضع هنا: ZYSBTimeEA.mq5, ZYSBCalendarEA.mq5
 ├── Scripts\
 ├── Indicators\
 ├── Include\
@@ -34,8 +34,8 @@ C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\22D22E9B393E16F638B440240FDD25
 
 ```
 C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\Common\Files\
-├── server_time.json     ← يُكتب تلقائيًا بواسطة NexusTimeEA
-└── calendar_dump.json   ← يُكتب تلقائيًا بواسطة NexusCalendarEA
+├── zysb_server_time.json     ← يُكتب تلقائيًا بواسطة ZYSBTimeEA
+└── zysb_calendar.json   ← يُكتب تلقائيًا بواسطة ZYSBCalendarEA
 ```
 
 > 💡 `bridge.py` يبحث تلقائيًا في هذا المسار المشترك عبر متغير البيئة `APPDATA`،
@@ -58,11 +58,11 @@ C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\Common\Files\
 افتح مجلد `Experts\` وانسخ إليه:
 
 ```
-من:  C:\B_Yemen_Smart\NexusTimeEA.mq5
-إلى: C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\22D22E9B393E16F638B440240FDD255D\MQL5\Experts\NexusTimeEA.mq5
+من:  C:\B_Yemen_Smart\ZYSBTimeEA.mq5
+إلى: C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\22D22E9B393E16F638B440240FDD255D\MQL5\Experts\ZYSBTimeEA.mq5
 
-من:  C:\B_Yemen_Smart\NexusCalendarEA.mq5
-إلى: C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\22D22E9B393E16F638B440240FDD255D\MQL5\Experts\NexusCalendarEA.mq5
+من:  C:\B_Yemen_Smart\ZYSBCalendarEA.mq5
+إلى: C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\22D22E9B393E16F638B440240FDD255D\MQL5\Experts\ZYSBCalendarEA.mq5
 ```
 
 ### 1.3 إعادة تحميل EAs في MT5
@@ -72,12 +72,12 @@ C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\Common\Files\
 - أعد تشغيل MT5
 
 سترى في Navigator → Expert Advisors:
-- `NexusTimeEA`
-- `NexusCalendarEA`
+- `ZYSBTimeEA`
+- `ZYSBCalendarEA`
 
-### 1.4 تثبيت NexusTimeEA على شارت
+### 1.4 تثبيت ZYSBTimeEA على شارت
 
-1. اسحب `NexusTimeEA` من Navigator إلى أي شارت (مثل XAUUSD M5)
+1. اسحب `ZYSBTimeEA` من Navigator إلى أي شارت (مثل XAUUSD M5)
 2. في نافذة الخصائص:
    - **Common**: فعّل ✅ "Allow Algorithmic Trading" (اختياري — الـ EA يعمل بدونه أيضًا)
    - **Inputs**: اترك `InpWriteSec = 10` (يكتب كل 10 ثوانٍ)
@@ -85,10 +85,10 @@ C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\Common\Files\
 
 ستشاهد في تبويب **Experts**:
 ```
-NexusTimeEA: يعمل — يكتب Common\Files\server_time.json
+ZYSBTimeEA: يعمل — يكتب Common\Files\zysb_server_time.json
 ```
 
-### 1.5 (اختياري) تثبيت NexusCalendarEA
+### 1.5 (اختياري) تثبيت ZYSBCalendarEA
 
 نفس الطريقة، لكن هذا الـ EA يكتب التقويم الاقتصادي كل 5 دقائق.
 
@@ -96,10 +96,10 @@ NexusTimeEA: يعمل — يكتب Common\Files\server_time.json
 
 ## الخطوة 2: التحقق من كتابة الملف
 
-بعد تثبيت `NexusTimeEA` لمدة 30 ثانية، تحقق من وجود الملف:
+بعد تثبيت `ZYSBTimeEA` لمدة 30 ثانية، تحقق من وجود الملف:
 
 ```cmd
-dir "C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\Common\Files\server_time.json"
+dir "C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\Common\Files\zysb_server_time.json"
 ```
 
 يجب أن ترى:
@@ -107,7 +107,7 @@ dir "C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\Common\Files\server_time.
  Volume in drive C has no label.
  Directory of C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\Common\Files
 
-27/10/2026  08:30 PM                85 server_time.json
+27/10/2026  08:30 PM                85 zysb_server_time.json
 ```
 
 افتحه بـ Notepad:
@@ -136,18 +136,18 @@ python bridge.py
 20:30:01 | INFO    | [ZYSB] | 🚀 بدء الحلقة الرئيسية
 ```
 
-> 💡 لو ثبّت `NexusTimeEA`، سيستخدم ZYSB قياسه الدقيق بدلًا من القياس التقريبي من tick.
+> 💡 لو ثبّت `ZYSBTimeEA`، سيستخدم ZYSB قياسه الدقيق بدلًا من القياس التقريبي من tick.
 
 ---
 
 ## اختياري: تخصيص المسار في `.env`
 
-لو أردت تحديد مسار مختلف لملف `server_time.json` (مثلاً لو لديك تثبيت MT5 آخر):
+لو أردت تحديد مسار مختلف لملف `zysb_server_time.json` (مثلاً لو لديك تثبيت MT5 آخر):
 
 ```env
 # في C:\B_Yemen_Smart\.env
-BRIDGE_SERVER_TIME_FILE=C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\Common\Files\server_time.json
-BRIDGE_CALENDAR_FILE=C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\Common\Files\calendar_dump.json
+BRIDGE_SERVER_TIME_FILE=C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\Common\Files\zysb_server_time.json
+BRIDGE_CALENDAR_FILE=C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\Common\Files\zysb_calendar.json
 ```
 
 افتراضيًا، ZYSB يبحث تلقائيًا في:
@@ -162,7 +162,7 @@ BRIDGE_CALENDAR_FILE=C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\Common\Fi
 
 ### المشكلة: الـ EA لا يكتب الملف
 
-**الأعراض:** `dir` يُظهر أن `server_time.json` غير موجود
+**الأعراض:** `dir` يُظهر أن `zysb_server_time.json` غير موجود
 
 **الحلول:**
 1. تأكد أنك نسخت الـ EA إلى `MQL5\Experts\` وليس مجلد آخر
@@ -177,14 +177,14 @@ BRIDGE_CALENDAR_FILE=C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\Common\Fi
 **السبب:** الـ EA لم يكتب الملف بعد، أو المسار غير صحيح
 
 **الحل:**
-1. شغّل `NexusTimeEA` لمدة 30 ثانية على الأقل
+1. شغّل `ZYSBTimeEA` لمدة 30 ثانية على الأقل
 2. تحقق من المسار يدويًا:
    ```cmd
-   dir "%APPDATA%\MetaQuotes\Terminal\Common\Files\server_time.json"
+   dir "%APPDATA%\MetaQuotes\Terminal\Common\Files\zysb_server_time.json"
    ```
 3. لو الملف في مسار مختلف، حدده في `.env`:
    ```env
-   BRIDGE_SERVER_TIME_FILE=C:\path\to\server_time.json
+   BRIDGE_SERVER_TIME_FILE=C:\path\to\zysb_server_time.json
    ```
 
 ### المشكلة: رسالة "الرمز XAUUSD غير موجود"
@@ -208,8 +208,8 @@ BRIDGE_CALENDAR_FILE=C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\Common\Fi
 |---|---|
 | ZYSB (الجسر) | `C:\B_Yemen_Smart\bridge.py` |
 | إعدادات ZYSB | `C:\B_Yemen_Smart\.env` |
-| EAs (تُنسخ إلى MT5) | `C:\B_Yemen_Smart\NexusTimeEA.mq5` → `MQL5\Experts\` |
-| ملف server_time.json | `%APPDATA%\MetaQuotes\Terminal\Common\Files\` (يُكتب تلقائيًا) |
-| ملف calendar_dump.json | `%APPDATA%\MetaQuotes\Terminal\Common\Files\` (يُكتب تلقائيًا) |
+| EAs (تُنسخ إلى MT5) | `C:\B_Yemen_Smart\ZYSBTimeEA.mq5` → `MQL5\Experts\` |
+| ملف zysb_server_time.json | `%APPDATA%\MetaQuotes\Terminal\Common\Files\` (يُكتب تلقائيًا) |
+| ملف zysb_calendar.json | `%APPDATA%\MetaQuotes\Terminal\Common\Files\` (يُكتب تلقائيًا) |
 | سجل ZYSB | `C:\B_Yemen_Smart\zysb.log` |
 | MT5 instance | `22D22E9B393E16F638B440240FDD255D` (معرّف فريد لتثبيتك) |

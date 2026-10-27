@@ -1,20 +1,24 @@
 //+------------------------------------------------------------------+
-//|                                              NexusCalendarEA.mq5 |
-//|  EA رفيق لنظام Nexus — يفرّغ التقويم الاقتصادي من ميتاتريدر 5    |
-//|  إلى ملف JSON يقرؤه bridge.py وينشره للخادم.                     |
+//|                                              ZYSBCalendarEA.mq5  |
+//|   EA رفيق لجسر ZYSB (Yemen Smart Bridge)                         |
+//|   يفرّغ التقويم الاقتصادي من ميتاتريدر 5 إلى ملف JSON يقرؤه      |
+//|   bridge.py وينشره للخادم.                                       |
 //|                                                                  |
-//|  v1.01 — إصلاح أخطاء التجميع:                                   |
+//|   v1.10 — إعادة تسمية بـ ZYSB لتمييزها عن EAs أخرى               |
+//|   v1.01 — إصلاح أخطاء التجميع:                                   |
 //|    - إزالة CALENDAR_MULTIPLIER_PERCENT (غير موجود في MQL5)       |
 //|    - إصلاح تحويل long→datetime بأمر صريح                        |
 //|                                                                  |
-//|  التثبيت:                                                        |
+//|   التثبيت:                                                        |
 //|   1) MetaEditor (F4) → مجلد Experts → الملف هنا → Compile (F7)   |
-//|   2) اسحبه على أي شارت في ترمينال OneRoyal                        |
+//|   2) اسحبه على أي شارت في ترمينال MT5                            |
 //|   3) اتركه يعمل — يكتب الملف كل 5 دقائق في مجلد Common\Files     |
+//|                                                                  |
+//|   ⚠️ الاسم يحوي ZYSB لتمييزه عن EAs أخرى قد تكون مثبتة في MT5    |
 //+------------------------------------------------------------------+
-#property copyright "Nexus Trading System"
-#property version   "1.01"
-#property description "يفرّغ التقويم الاقتصادي MT5 إلى calendar_dump.json لجسر Nexus"
+#property copyright "Yemen Smart (ZYSB)"
+#property version   "1.10"
+#property description "ZYSB Calendar EA — يفرّغ التقويم الاقتصادي MT5 إلى zysb_calendar.json لجسر ZYSB"
 
 #property strict
 
@@ -24,7 +28,7 @@ input int    InpMinImportance = 0;          // أهمية دنيا: 0=الكل 1
 input int    InpDaysBack      = 2;          // أيام ماضية
 input int    InpDaysAhead     = 14;         // أيام قادمة
 input int    InpTimerSec      = 300;        // دورة التحديث (ثانية)
-input string InpFileName      = "calendar_dump.json"; // اسم الملف (في Common\Files)
+input string InpFileName      = "zysb_calendar.json"; // اسم الملف (في Common\Files)
 
 string g_lastHash = "";   // منع إعادة الكتابة إن لم يتغير المحتوى
 bool   g_calendarDisabled = false;
@@ -124,22 +128,22 @@ void DumpCalendar()
          if(!g_calendarDisabled)
            {
             g_calendarDisabled = true;
-            Print("⚠️ التقويم الاقتصادي غير متاح من الوسيط (خطأ ", err, ")");
+            Print("⚠️ ZYSBCalendarEA: التقويم الاقتصادي غير متاح من الوسيط (خطأ ", err, ")");
            }
         }
       else
-         Print("⚠️ CalendarValueHistory فشل، خطأ=", err);
+         Print("⚠️ ZYSBCalendarEA: CalendarValueHistory فشل، خطأ=", err);
       return;
      }
 
    int total = ArraySize(values);
    if(total <= 0)
      {
-      Comment("NexusCalendarEA: لا أحداث في النطاق");
+      Comment("ZYSBCalendarEA: لا أحداث في النطاق");
       return;
      }
 
-   string json = "{\"generated_at\":\"" + IsoUtc(server_now, tz_off) +
+   string json = "{\"bridge_name\":\"ZYSB\",\"generated_at\":\"" + IsoUtc(server_now, tz_off) +
                  "\",\"events\":[";
    int count = 0;
 
@@ -199,7 +203,7 @@ void DumpCalendar()
 
    if(count == 0)
      {
-      Comment("NexusCalendarEA: لا أحداث بعد الفلترة (العملات/الأهمية)");
+      Comment("ZYSBCalendarEA: لا أحداث بعد الفلترة (العملات/الأهمية)");
       return;
      }
 
@@ -208,27 +212,27 @@ void DumpCalendar()
                  "_" + StringSubstr(json, 40, 32);
    if(hash == g_lastHash)
      {
-      Comment("NexusCalendarEA: لا تغيير — ", count, " حدثاً (آخر تحديث ",
+      Comment("ZYSBCalendarEA: لا تغيير — ", count, " حدثاً (آخر تحديث ",
               TimeToString(TimeLocal(), TIME_MINUTES), ")");
       return;
      }
    g_lastHash = hash;
 
    // كتابة في المجلد المشترك بين كل الترمينالات:
-   // %APPDATA%\MetaQuotes\Terminal\Common\Files\calendar_dump.json
+   // %APPDATA%\MetaQuotes\Terminal\Common\Files\zysb_calendar.json
    int h = FileOpen(InpFileName, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
    if(h == INVALID_HANDLE)
      {
-      Print("⚠️ فشل فتح الملف للكتابة، خطأ=", GetLastError());
+      Print("⚠️ ZYSBCalendarEA: فشل فتح الملف للكتابة، خطأ=", GetLastError());
       return;
      }
    FileWriteString(h, json);
    FileClose(h);
 
    g_calendarDisabled = false;
-   Comment("NexusCalendarEA: ✅ نُشر ", count, " حدثاً إلى ", InpFileName,
+   Comment("ZYSBCalendarEA: ✅ نُشر ", count, " حدثاً إلى ", InpFileName,
            " (Common\\Files) — ", TimeToString(TimeLocal(), TIME_DATE | TIME_MINUTES));
-   Print("📅 NexusCalendarEA: نُشر ", count, " حدثاً اقتصادياً");
+   Print("📅 ZYSBCalendarEA: نُشر ", count, " حدثاً اقتصادياً");
   }
 
 //+------------------------------------------------------------------+

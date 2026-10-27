@@ -171,7 +171,7 @@ POSITIONS_POLL_SEC = _get_env_float("BRIDGE_POSITIONS_POLL_SEC", 30.0)
 # التوقيت
 SERVER_TZ_OFFSET: Any = _get_env("BRIDGE_SERVER_TZ_OFFSET", "auto")
 DEFAULT_TZ_OFFSET_HOURS = 2.0
-SERVER_TIME_FILE = _get_env("BRIDGE_SERVER_TIME_FILE", "server_time.json")
+SERVER_TIME_FILE = _get_env("BRIDGE_SERVER_TIME_FILE", "zysb_server_time.json")
 TZ_RECHECK_SEC = 1800.0
 
 # التنفيذ
@@ -184,7 +184,7 @@ ALLOW_REAL_ACCOUNT = _get_env_bool("BRIDGE_ALLOW_REAL_ACCOUNT", False)
 EXECUTE_VIA_API = _get_env_bool("BRIDGE_EXECUTE_VIA_API", True)  # true = عبر الخادم
 
 # التقويم
-CALENDAR_FILE = _get_env("BRIDGE_CALENDAR_FILE", "calendar_dump.json")
+CALENDAR_FILE = _get_env("BRIDGE_CALENDAR_FILE", "zysb_calendar.json")
 
 # إعادة المحاولة
 MAX_RETRIES = _get_env_int("BRIDGE_MAX_RETRIES", 2)
@@ -330,7 +330,7 @@ def _server_to_utc(epoch_seconds: int) -> str:
 
 
 def _read_ea_offset_hours() -> float | None:
-    """الفارق الدقيق من NexusTimeEA."""
+    """الفارق الدقيق من ZYSBTimeEA."""
     try:
         paths = [os.path.abspath(SERVER_TIME_FILE)]
         appdata = os.environ.get("APPDATA", "")

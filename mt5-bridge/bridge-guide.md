@@ -116,7 +116,7 @@ python bridge.py
 كل الشموع والـ ticks من MT5 تحمل **توقيت سيرفر الوسيط**، ونظام Yemen Smart يحتاج UTC. الجسر يحل هذا وحده:
 
 1. **وضع `"auto"` (الافتراضي):** عند أول نشاط سوق يقيس الجسر الفارق من أحدث tick، ويعيد الفحص كل 30 دقيقة.
-2. **(اختياري) دقة 100% عبر EA رفيق `NexusTimeEA.mq5`** — يستخدم `TimeCurrent`/`TimeGMT` ويكتب الفارق في `server_time.json`.
+2. **(اختياري) دقة 100% عبر EA رفيق `ZYSBTimeEA.mq5`** — يستخدم `TimeCurrent`/`TimeGMT` ويكتب الفارق في `zysb_server_time.json`.
 
 ترتيب الأولوية: رقم ثابت في `BRIDGE_SERVER_TZ_OFFSET` > ملف EA الرفيق > قياس تلقائي > افتراضي 2.0.
 

@@ -808,3 +808,59 @@ Stage Summary:
 - B_Yemen_Smart/INSTALL-RD66.md
 - B_Yemen_Smart/install_eas.cmd
 - B_Yemen_Smart/check_mt5.cmd
+
+---
+Task ID: 31
+Agent: main (Z.ai)
+Task: تحديث ملفات EA الرفيقة بإضافة ZYSB لتفادي التعارض
+
+Work Log:
+- سبب التحديث: تجنب تعارض أسماء EAs في MT5 لو كان لدى المستخدم EAs أخرى بنفس الاسم
+- إعادة تسمية ملفات EA:
+  • NexusTimeEA.mq5     → ZYSBTimeEA.mq5
+  • NexusCalendarEA.mq5 → ZYSBCalendarEA.mq5
+- تحديث محتوى الـ EAs:
+  • #property copyright: "Nexus Trading System" → "Yemen Smart (ZYSB)"
+  • #property version: 1.00/1.01 → 1.10 (مع وصف الإعادة تسمية)
+  • #property description: مضافة لكلا الـ EAs
+  • رسائل Print/Comment: "NexusTimeEA:" → "ZYSBTimeEA:" و"NexusCalendarEA:" → "ZYSBCalendarEA:"
+  • FILE_NAME const في ZYSBTimeEA: "server_time.json" → "zysb_server_time.json"
+  • InpFileName default في ZYSBCalendarEA: "calendar_dump.json" → "zysb_calendar.json"
+  • إضافة حقل "bridge_name":"ZYSB" في JSON output لكلا الـ EAs
+- حذف الملفات القديمة (NexusTimeEA.mq5, NexusCalendarEA.mq5) من المستودع
+- تحديث bridge.py:
+  • SERVER_TIME_FILE default: "server_time.json" → "zysb_server_time.json"
+  • CALENDAR_FILE default: "calendar_dump.json" → "zysb_calendar.json"
+- تحديث .env.example, bridge-guide.md, INSTALL-RD66.md:
+  • استبدال كل المراجع القديمة بالأسماء الجديدة (43 استبدال)
+- تحديث حزمة B_Yemen_Smart:
+  • حذف NexusTimeEA.mq5, NexusCalendarEA.mq5
+  • إضافة ZYSBTimeEA.mq5, ZYSBCalendarEA.mq5
+  • تحديث .env بـ BRIDGE_CALENDAR_FILE=zysb_calendar.json
+  • تحديث install_eas.cmd للبحث عن ZYSBTimeEA.mq5 + ZYSBCalendarEA.mq5
+  • تحديث check_mt5.cmd للبحث عن zysb_server_time.json
+- اختبار بناء الجملة + env loading:
+  • ast.parse bridge.py: ✓
+  • BRIDGE_NAME=ZYSB ✓
+  • SERVER_TIME_FILE=zysb_server_time.json ✓ (بعد إصلاح bug مضاعفة prefix)
+  • CALENDAR_FILE=zysb_calendar.json ✓
+  • LOG_FILE=zysb.log ✓
+- إعادة إنشاء B_Yemen_Smart.zip (34.5KB، 13 ملفًا)
+
+Stage Summary:
+- ✅ كل EAs الرفيقة معاد تسميتها بـ ZYSB prefix
+- ✅ أسماء ملفات الإخراج (zysb_server_time.json, zysb_calendar.json) متمايزة
+- ✅ bridge.py + .env + docs كلها متوافقة مع الأسماء الجديدة
+- ✅ الحزمة ZIP محدّثة بالكامل
+- ⏳ بانتظار رفع التحديثات إلى GitHub
+
+الملفات المُعدّلة:
+- mt5-bridge/ZYSBTimeEA.mq5         (جديد — بدلًا من NexusTimeEA.mq5)
+- mt5-bridge/ZYSBCalendarEA.mq5     (جديد — بدلًا من NexusCalendarEA.mq5)
+- mt5-bridge/NexusTimeEA.mq5        (محذوف)
+- mt5-bridge/NexusCalendarEA.mq5    (محذوف)
+- mt5-bridge/bridge.py              (default file names)
+- mt5-bridge/.env.example           (مراجع)
+- mt5-bridge/bridge-guide.md        (مراجع)
+- mt5-bridge/INSTALL-RD66.md        (مراجع)
+- WORKLOG.md                        (هذا السجل)
