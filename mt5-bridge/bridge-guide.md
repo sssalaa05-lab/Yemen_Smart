@@ -26,17 +26,46 @@
 3. افتح منصة MT5 وسجّل دخولك (حساب **Demo** للبداية)
 4. من القائمة: Tools → Options → Expert Advisors → فعّل ✅ **Allow algorithmic trading**
 
-## الخطوة 2 — ضبط الإعدادات في bridge.py
+## الخطوة 2 — ضبط الإعدادات عبر متغيرات البيئة
 
-افتح `bridge.py` بأي محرر وعدّل قسم الإعدادات أعلى الملف:
+> ⚠️ **مهم**: الإعدادات تُقرأ من **متغيرات البيئة** (وليست hardcoded في الكود).
+> هذا يسمح بتغيير الرابط عند كل جلسة جديدة دون تعديل الكود.
+
+### الطريقة الأبسط: ملف `.env`
+
+1. انسخ `.env.example` إلى `.env` في نفس مجلد `bridge.py`:
+   ```cmd
+   copy .env.example .env
+   ```
+2. افتح `.env` بـ Notepad وعدّل القيمتين:
 
 | الإعداد | القيمة | ملاحظة |
 |---------|--------|--------|
-| `NEXUS_URL` | رابط لوحتك (موجود مضبوطاً) | لا تغيّره إلا إذا تغير الرابط |
-| `BRIDGE_TOKEN` | موجود مضبوطاً | مطابق للخادم — لا تشاركه مع أحد |
-| `SYMBOL_MAP` | اسم رمزك عند وسيطك | افتح Market Watch في MT5 وانظر الاسم الفعلي (XAUUSD أو GOLD أو XAUUSDm...) واكتبه مكان `"XAUUSD"` الثانية |
-| `SERVER_TZ_OFFSET_HOURS` | `"auto"` (اتركه كما هو) | يقيس فارق سيرفرك تلقائياً من أحدث tick ويصحح التوقيت الصيفي وحده (انظر قسم التوقيت أدناه) — أو ضع رقماً ثابتاً 2.0/3.0 إن أردت |
-| `EXECUTE` | `False` | **اتركها False أولاً** — الجسر يرسل البيانات فقط |
+| `NEXUS_URL` | `https://preview-chat-<chat_id>.space-z.ai` | رابط المعاينة للجلسة الحالية على Z.ai — يتغير مع كل جلسة |
+| `NEXUS_BRIDGE_TOKEN` | `nxb-xxxxxxxxxxxxxxxx` | نفس `NEXUS_BRIDGE_TOKEN` في `.env` على الخادم |
+| `SYMBOL_MAP` | (داخل bridge.py) | افتح Market Watch في MT5 وانظر الاسم الفعلي (XAUUSD أو GOLD أو XAUUSDm...) واكتبه مكان `"XAUUSD"` الثانية |
+| `SERVER_TZ_OFFSET_HOURS` | `"auto"` | يقيس فارق سيرفرك تلقائيًا |
+| `EXECUTE` | `False` | **اتركها False أولًا** — الجسر يرسل البيانات فقط |
+
+### الطريقة البديلة: متغيرات البيئة مباشرة
+
+في CMD على ويندوز:
+```cmd
+set NEXUS_URL=https://preview-chat-d0892827-2907-4791-a397-f9ce9bb5fda4.space-z.ai
+set NEXUS_BRIDGE_TOKEN=nxb-56486951b9f72bb544ad
+python bridge.py
+```
+
+في PowerShell:
+```powershell
+$env:NEXUS_URL="https://preview-chat-d0892827-2907-4791-a397-f9ce9bb5fda4.space-z.ai"
+$env:NEXUS_BRIDGE_TOKEN="nxb-56486951b9f72bb544ad"
+python bridge.py
+```
+
+### أو شغّل بملف واحد: `start_bridge.cmd`
+
+ببساطة انقر مرتين على `start_bridge.cmd` — سيقرأ ملف `.env` تلقائيًا ويشغل الجسر.
 
 ## الخطوة 3 — التشغيل
 

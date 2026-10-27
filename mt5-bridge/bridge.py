@@ -11,6 +11,28 @@
 ║   المتطلبات:  Python 3.10+  على ويندوز                                   ║
 ║               pip install MetaTrader5 requests                           ║
 ║               ترمينال MT5 مفتوح + زر Algo Trading مفعّل (للتنفيذ فقط)    ║
+║                                                                          ║
+║   ─────────────────────────────────────────────────────────────────────  ║
+║   ⚙️  الإعدادات تُقرأ من متغيرات البيئة (أكثر أمانًا وأسهل تغييرًا):      ║
+║                                                                          ║
+║   NEXUS_URL          (إلزامي) رابط النظام كاملًا                         ║
+║                                    مثال:                                ║
+║   https://preview-chat-<chat_id>.space-z.ai                             ║
+║   أو http://localhost:3000 (للاختبار المحلي)                             ║
+║                                                                          ║
+║   NEXUS_BRIDGE_TOKEN (إلزامي) توكن الجسر (من .env على الخادم)            ║
+║                                    مثال: nxb-xxxxxxxxxxxxxxxx          ║
+║                                                                          ║
+║   ─────────────────────────────────────────────────────────────────────  ║
+║   مثال CMD على ويندوز:                                                   ║
+║   set NEXUS_URL=https://preview-chat-<chat_id>.space-z.ai               ║
+║   set NEXUS_BRIDGE_TOKEN=nxb-xxxxxxxxxxxxxxxx                           ║
+║   python bridge.py                                                       ║
+║                                                                          ║
+║   مثال PowerShell:                                                       ║
+║   $env:NEXUS_URL="https://preview-chat-<chat_id>.space-z.ai"            ║
+║   $env:NEXUS_BRIDGE_TOKEN="nxb-xxxxxxxxxxxxxxxx"                        ║
+║   python bridge.py                                                       ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -33,16 +55,38 @@ except ImportError:
     sys.exit(1)
 
 # ════════════════════════════════════════════════════════════════════════════
-#  الإعدادات — عدّل هذا القسم فقط
+#  الإعدادات — تُقرأ من متغيرات البيئة (لا تُعدّل الكود يدويًا)
 # ════════════════════════════════════════════════════════════════════════════
 
-# عنوان نظام Nexus (نفس الرابط الذي تفتح به اللوحة من متصفحك)
-# مثال: "http://localhost:3000" أو "https://your-nexus-domain.com"
-NEXUS_URL = os.environ.get("NEXUS_URL", "http://localhost:3000")
+# عنوان نظام Nexus — يُقرأ من NEXUS_URL (إلزامي)
+# مثال: "https://preview-chat-<chat_id>.space-z.ai" أو "http://localhost:3000"
+NEXUS_URL = os.environ.get("NEXUS_URL", "").rstrip("/")
 
-# مفتاح الجسر (نفس NEXUS_BRIDGE_TOKEN في .env على الخادم)
-# ⚠️ لا تضع التوكن هنا! استخدم متغير البيئة NEXUS_BRIDGE_TOKEN
-BRIDGE_TOKEN = os.environ.get("NEXUS_BRIDGE_TOKEN", "PUT-YOUR-BRIDGE-TOKEN-HERE")
+# مفتاح الجسر — يُقرأ من NEXUS_BRIDGE_TOKEN (إلزامي)
+# ⚠️ لا تضع التوكن في الكود! استخدم متغير البيئة دائمًا
+BRIDGE_TOKEN = os.environ.get("NEXUS_BRIDGE_TOKEN", "")
+
+# التحقق من وجود الإعدادات الإلزامية عند بدء التشغيل
+if not NEXUS_URL:
+    print("❌ NEXUS_URL غير محدد!")
+    print("   حدد رابط النظام قبل تشغيل الجسر:")
+    print('   set NEXUS_URL=https://preview-chat-<chat_id>.space-z.ai')
+    sys.exit(1)
+
+if not BRIDGE_TOKEN:
+    print("❌ NEXUS_BRIDGE_TOKEN غير محدد!")
+    print("   حدد توكن الجسر قبل تشغيل الجسر:")
+    print('   set NEXUS_BRIDGE_TOKEN=nxb-xxxxxxxxxxxxxxxx')
+    sys.exit(1)
+
+# طباعة الإعدادات الفعالة (للتأكد قبل التشغيل)
+print("═" * 70)
+print("  NEXUS MT5 BRIDGE — الإعدادات الفعالة")
+print("═" * 70)
+print(f"  NEXUS_URL          = {NEXUS_URL}")
+print(f"  NEXUS_BRIDGE_TOKEN = {BRIDGE_TOKEN[:15]}{'*' * (len(BRIDGE_TOKEN) - 15)}")
+print("═" * 70)
+print()
 
 # الرموز المنطقية في Nexus ← الاسم الفعلي في نافذة Market Watch بترمينالك
 # (بعض الوسطاء يستخدمون GOLD أو XAUUSD.a أو XAUUSDm — اكتب اسمك الصحيح هنا)
@@ -119,29 +163,66 @@ _state: dict[str, Any] = {
 
 
 # ─────────────────────────────── أدوات HTTP ────────────────────────────────
+# إعادة المحاولة عند فشل الشبكة (502 Bad Gateway, timeout, إلخ)
+MAX_RETRIES = 3
+RETRY_BACKOFF_SEC = [1, 3, 8]  # ثوانٍ بين المحاولات
+
+
 def _post(path: str, payload: dict) -> dict | None:
-    try:
-        r = SESSION.post(f"{NEXUS_URL}{path}", json=payload, timeout=15)
-        if r.status_code == 401:
-            log.error("❌ التوكن مرفوض من الخادم — تحقق من BRIDGE_TOKEN")
-            return None
-        r.raise_for_status()
-        return r.json()
-    except requests.RequestException as exc:
-        log.warning("POST %s فشل: %s", path, exc)
-        return None
+    last_exc = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            r = SESSION.post(f"{NEXUS_URL}{path}", json=payload, timeout=15)
+            if r.status_code == 401:
+                log.error("❌ التوكن مرفوض من الخادم — تحقق من NEXUS_BRIDGE_TOKEN")
+                return None
+            if r.status_code == 502:
+                log.warning("⚠️  502 Bad Gateway — الخادم لا يستجيب (محاولة %d/%d)",
+                            attempt + 1, MAX_RETRIES)
+                last_exc = f"502 Bad Gateway for {path}"
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_BACKOFF_SEC[attempt])
+                    continue
+                return None
+            r.raise_for_status()
+            return r.json()
+        except requests.RequestException as exc:
+            last_exc = str(exc)
+            log.warning("POST %s فشل (محاولة %d/%d): %s",
+                        path, attempt + 1, MAX_RETRIES, exc)
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_BACKOFF_SEC[attempt])
+    log.error("❌ POST %s فشل نهائيًا بعد %d محاولات: %s",
+              path, MAX_RETRIES, last_exc)
+    return None
 
 
 def _get(path: str) -> dict | None:
-    try:
-        r = SESSION.get(f"{NEXUS_URL}{path}", timeout=15)
-        if r.status_code == 404:
-            return None
-        r.raise_for_status()
-        return r.json()
-    except requests.RequestException as exc:
-        log.warning("GET %s فشل: %s", path, exc)
-        return None
+    last_exc = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            r = SESSION.get(f"{NEXUS_URL}{path}", timeout=15)
+            if r.status_code == 404:
+                return None
+            if r.status_code == 502:
+                log.warning("⚠️  502 Bad Gateway على GET %s (محاولة %d/%d)",
+                            path, attempt + 1, MAX_RETRIES)
+                last_exc = f"502 Bad Gateway for {path}"
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_BACKOFF_SEC[attempt])
+                    continue
+                return None
+            r.raise_for_status()
+            return r.json()
+        except requests.RequestException as exc:
+            last_exc = str(exc)
+            log.warning("GET %s فشل (محاولة %d/%d): %s",
+                        path, attempt + 1, MAX_RETRIES, exc)
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_BACKOFF_SEC[attempt])
+    log.error("❌ GET %s فشل نهائيًا بعد %d محاولات: %s",
+              path, MAX_RETRIES, last_exc)
+    return None
 
 
 def _server_to_utc(epoch_seconds: int) -> str:
