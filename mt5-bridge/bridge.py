@@ -1,29 +1,20 @@
 # -*- coding: utf-8 -*-
 """
 ╔══════════════════════════════════════════════════════════════════════════╗
-║   NEXUS MT5 BRIDGE — الجسر بين MetaTrader 5 ونظام Nexus                  ║
+║   NEXUS MT5 BRIDGE v2.0 — Single-Threaded Sequential                    ║
+║   حل جذري لمشكلة 429 Too Many Requests                                   ║
 ║                                                                          ║
-║   يعمل على جهاز ويندوز بجانب ترمينال MT5 ويقوم بثلاث مهام:               ║
-║   1) يقرأ الأسعار اللحظية (Ticks) من MT5 ويرسلها لنظام Nexus             ║
-║   2) يقرأ الشموع (OHLCV M5) ويرسلها بنفس مسار التغذية الداخلية           ║
-║   3) (اختياري) يستقبل قرارات الوكلاء وينفذها في MT5 فعلياً               ║
+║   التصميم الجديد:                                                        ║
+║   - حلقة واحدة متسلسلة (لا تزامن)                                       ║
+║   - طلب HTTP واحد فقط في كل لحظة                                        ║
+║   - تردد منخفض (آمن لحاوية Z.ai)                                        ║
+║   - لا إعادة محاولة (تتجنب تراكم الطلبات)                               ║
+║   - معالجة numpy.void من copy_rates_from_pos (numpy 2.x)                ║
 ║                                                                          ║
-║   المتطلبات:  Python 3.10+  على ويندوز                                   ║
-║               pip install MetaTrader5 requests                           ║
-║               ترمينال MT5 مفتوح + زر Algo Trading مفعّل (للتنفيذ فقط)    ║
+║   الإعدادات تُقرأ من متغيرات البيئة:                                     ║
+║   NEXUS_URL          (إلزامي) رابط النظام                               ║
+║   NEXUS_BRIDGE_TOKEN (إلزامي) توكن الجسر                                ║
 ║                                                                          ║
-║   ─────────────────────────────────────────────────────────────────────  ║
-║   ⚙️  الإعدادات تُقرأ من متغيرات البيئة (أكثر أمانًا وأسهل تغييرًا):      ║
-║                                                                          ║
-║   NEXUS_URL          (إلزامي) رابط النظام كاملًا                         ║
-║                                    مثال:                                ║
-║   https://preview-chat-<chat_id>.space-z.ai                             ║
-║   أو http://localhost:3000 (للاختبار المحلي)                             ║
-║                                                                          ║
-║   NEXUS_BRIDGE_TOKEN (إلزامي) توكن الجسر (من .env على الخادم)            ║
-║                                    مثال: nxb-xxxxxxxxxxxxxxxx          ║
-║                                                                          ║
-║   ─────────────────────────────────────────────────────────────────────  ║
 ║   مثال CMD على ويندوز:                                                   ║
 ║   set NEXUS_URL=https://preview-chat-<chat_id>.space-z.ai               ║
 ║   set NEXUS_BRIDGE_TOKEN=nxb-xxxxxxxxxxxxxxxx                           ║
@@ -55,18 +46,12 @@ except ImportError:
     sys.exit(1)
 
 # ════════════════════════════════════════════════════════════════════════════
-#  الإعدادات — تُقرأ من متغيرات البيئة (لا تُعدّل الكود يدويًا)
+#  الإعدادات — تُقرأ من متغيرات البيئة
 # ════════════════════════════════════════════════════════════════════════════
 
-# عنوان نظام Nexus — يُقرأ من NEXUS_URL (إلزامي)
-# مثال: "https://preview-chat-<chat_id>.space-z.ai" أو "http://localhost:3000"
 NEXUS_URL = os.environ.get("NEXUS_URL", "").rstrip("/")
-
-# مفتاح الجسر — يُقرأ من NEXUS_BRIDGE_TOKEN (إلزامي)
-# ⚠️ لا تضع التوكن في الكود! استخدم متغير البيئة دائمًا
 BRIDGE_TOKEN = os.environ.get("NEXUS_BRIDGE_TOKEN", "")
 
-# التحقق من وجود الإعدادات الإلزامية عند بدء التشغيل
 if not NEXUS_URL:
     print("❌ NEXUS_URL غير محدد!")
     print("   حدد رابط النظام قبل تشغيل الجسر:")
@@ -79,59 +64,44 @@ if not BRIDGE_TOKEN:
     print('   set NEXUS_BRIDGE_TOKEN=nxb-xxxxxxxxxxxxxxxx')
     sys.exit(1)
 
-# طباعة الإعدادات الفعالة (للتأكد قبل التشغيل)
 print("═" * 70)
-print("  NEXUS MT5 BRIDGE — الإعدادات الفعالة")
+print("  NEXUS MT5 BRIDGE v2.0 — Single-Threaded Sequential")
 print("═" * 70)
 print(f"  NEXUS_URL          = {NEXUS_URL}")
-print(f"  NEXUS_BRIDGE_TOKEN = {BRIDGE_TOKEN[:15]}{'*' * (len(BRIDGE_TOKEN) - 15)}")
+print(f"  NEXUS_BRIDGE_TOKEN = {BRIDGE_TOKEN[:15]}{'*' * max(0, len(BRIDGE_TOKEN) - 15)}")
 print("═" * 70)
 print()
 
-# الرموز المنطقية في Nexus ← الاسم الفعلي في نافذة Market Watch بترمينالك
-# (بعض الوسطاء يستخدمون GOLD أو XAUUSD.a أو XAUUSDm — اكتب اسمك الصحيح هنا)
+# ── تردد الإرسال (منخفض — آمن لحاوية Z.ai) ──
+POLL_TICKS_SEC = 5.0       # tick كل 5 ثوانٍ
+POLL_BARS_SEC = 60.0       # فحص شمعة جديدة كل دقيقة
+HEARTBEAT_SEC = 60.0       # نبضة كل دقيقة
+DECISION_POLL_SEC = 120.0  # قرار كل دقيقتين
+CALENDAR_POLL_SEC = 300.0  # تقويم كل 5 دقائق
+SEED_BARS = 1500
+
+# ── إعدادات إضافية ──
 SYMBOL_MAP: dict[str, str] = {
     "XAUUSD": "XAUUSD",
     # "BTCUSD": "BTCUSD",
     # "EURUSD": "EURUSD",
 }
-
-# فارق توقيت سيرفر الوسيط عن UTC بالساعات (وثيقة MQL5 Date&Time):
-#   "auto" (موصى به) = يقيسه الجسر تلقائياً من أحدث tick أثناء نشاط السوق
-#                      ويعيد الفحص كل 30 دقيقة → يلتقط التوقيت الصيفي وحده.
-#   أو رقم ثابت مثل 2.0 / 3.0 إذا عرفت فارق سيرفرك وأردت تثبيته يدوياً.
 SERVER_TZ_OFFSET_HOURS: Any = "auto"
-DEFAULT_TZ_OFFSET_HOURS = 2.0      # يُستخدم مؤقتاً إذا تعذر القياس (السوق مغلق)
-SERVER_TIME_FILE = "server_time.json"  # اختياري: ملف EA الرفيق (NexusTimeEA) — فارق دقيق 100%
-TZ_RECHECK_SEC = 1800.0            # إعادة قياس الفارق كل 30 دقيقة في وضع auto
+DEFAULT_TZ_OFFSET_HOURS = 2.0
+SERVER_TIME_FILE = "server_time.json"
+TZ_RECHECK_SEC = 1800.0
 
-POLL_TICKS_SEC = 1.0      # كل ثانية: قراءة السعر اللحظي
-POLL_BARS_SEC = 15.0      # كل 15 ثانية: فحص شموع M5 جديدة
-HEARTBEAT_SEC = 30.0      # نبضة الحالة كل 30 ثانية
-DECISION_POLL_SEC = 45.0  # فحص قرارات الوكلاء كل 45 ثانية
-SEED_BARS = 1500          # عدد الشموع المرسلة عند أول اتصال (تاريخ) — يكفي لتدريب ML فورًا
-
-# ملف تفريغ التقويم الاقتصادي (اختياري — من EA رفيق لاحقاً؛ اتركه كما هو
-# إن لم يكن لديك: الجسر يتجاهله بهدوء حتى يظهر)
-CALENDAR_FILE = "calendar_dump.json"
-CALENDAR_POLL_SEC = 120.0
-
-def _calendar_candidates() -> list[str]:
-    """مسارات محتملة لملف التقويم: مجلد العمل + Common\\Files لميتاتريدر."""
-    cands = [os.path.abspath(CALENDAR_FILE)]
-    appdata = os.environ.get("APPDATA", "")
-    if appdata:
-        cands.append(os.path.join(
-            appdata, "MetaQuotes", "Terminal", "Common", "Files", "calendar_dump.json"))
-    return cands
-
-# ── التنفيذ (اتركه False في البداية!) ────────────────────────────────────────
 EXECUTE = False           # True = ينفذ قرارات الوكلاء في MT5 فعلياً
 MIN_CONVICTION = 65       # لا ينفذ إلا إذا كانت قناعة القرار >= هذا الرقم
 LOT = 0.01                # حجم العقد
 SL_POINTS = 300           # وقف الخسارة بالنقاط (0 = بدون) — للذهب 300 نقطة ≈ 3$
 TP_POINTS = 600           # الهدف بالنقاط (0 = بدون)
 ALLOW_REAL_ACCOUNT = False  # ⚠️ اجعلها True فقط إذا كنت تريد التنفيذ على حساب حقيقي
+
+CALENDAR_FILE = "calendar_dump.json"
+
+# ════════════════════════════════════════════════════════════════════════════
+#  التهيئة
 # ════════════════════════════════════════════════════════════════════════════
 
 logging.basicConfig(
@@ -152,477 +122,477 @@ SESSION.headers.update({
 })
 
 _state: dict[str, Any] = {
-    "tz_offset_hours": DEFAULT_TZ_OFFSET_HOURS,  # يُحدَّث بـ resolve_tz_offset()
-    "last_bar_ts": {},     # symbol → آخر timestamp شمعة أُرسلت
-    "seeded": set(),       # الرموز التي أرسلنا تاريخها
-    "last_tick": {},       # symbol → آخر (time,bid,ask) لتفادي التكرار
+    "tz_offset_hours": DEFAULT_TZ_OFFSET_HOURS,
+    "last_bar_ts": {},
+    "seeded": set(),
+    "last_tick": {},
     "last_decision_id": None,
     "last_tick_ts": None,
-    "calendar_mtime": 0.0, # آخر تعديل لملف التقويم
+    "calendar_mtime": 0.0,
 }
 
 
-# ─────────────────────────────── أدوات HTTP ────────────────────────────────
-# إعادة المحاولة عند فشل الشبكة (502 Bad Gateway, timeout, إلخ)
-MAX_RETRIES = 3
-RETRY_BACKOFF_SEC = [1, 3, 8]  # ثوانٍ بين المحاولات
-
+# ════════════════════════════════════════════════════════════════════════════
+#  أدوات HTTP — لا إعادة محاولة (مفتاح حل 429)
+# ════════════════════════════════════════════════════════════════════════════
 
 def _post(path: str, payload: dict) -> dict | None:
-    last_exc = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            r = SESSION.post(f"{NEXUS_URL}{path}", json=payload, timeout=15)
-            if r.status_code == 401:
-                log.error("❌ التوكن مرفوض من الخادم — تحقق من NEXUS_BRIDGE_TOKEN")
-                return None
-            if r.status_code == 502:
-                log.warning("⚠️  502 Bad Gateway — الخادم لا يستجيب (محاولة %d/%d)",
-                            attempt + 1, MAX_RETRIES)
-                last_exc = f"502 Bad Gateway for {path}"
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_BACKOFF_SEC[attempt])
-                    continue
-                return None
-            r.raise_for_status()
-            return r.json()
-        except requests.RequestException as exc:
-            last_exc = str(exc)
-            log.warning("POST %s فشل (محاولة %d/%d): %s",
-                        path, attempt + 1, MAX_RETRIES, exc)
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_BACKOFF_SEC[attempt])
-    log.error("❌ POST %s فشل نهائيًا بعد %d محاولات: %s",
-              path, MAX_RETRIES, last_exc)
-    return None
+    """POST طلب واحد — لا إعادة محاولة لتجنب تراكم الطلبات."""
+    try:
+        r = SESSION.post(f"{NEXUS_URL}{path}", json=payload, timeout=15)
+        if r.status_code == 401:
+            log.error("❌ التوكن مرفوض من الخادم — تحقق من NEXUS_BRIDGE_TOKEN")
+            return None
+        if r.status_code == 429:
+            log.warning("⚠️  429 Too Many Requests — تخطى هذه الدورة")
+            return None
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException as exc:
+        log.warning("POST %s فشل: %s", path, exc)
+        return None
 
 
 def _get(path: str) -> dict | None:
-    last_exc = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            r = SESSION.get(f"{NEXUS_URL}{path}", timeout=15)
-            if r.status_code == 404:
-                return None
-            if r.status_code == 502:
-                log.warning("⚠️  502 Bad Gateway على GET %s (محاولة %d/%d)",
-                            path, attempt + 1, MAX_RETRIES)
-                last_exc = f"502 Bad Gateway for {path}"
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_BACKOFF_SEC[attempt])
-                    continue
-                return None
-            r.raise_for_status()
-            return r.json()
-        except requests.RequestException as exc:
-            last_exc = str(exc)
-            log.warning("GET %s فشل (محاولة %d/%d): %s",
-                        path, attempt + 1, MAX_RETRIES, exc)
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_BACKOFF_SEC[attempt])
-    log.error("❌ GET %s فشل نهائيًا بعد %d محاولات: %s",
-              path, MAX_RETRIES, last_exc)
-    return None
+    """GET طلب واحد — لا إعادة محاولة."""
+    try:
+        r = SESSION.get(f"{NEXUS_URL}{path}", timeout=15)
+        if r.status_code == 404:
+            return None
+        if r.status_code == 429:
+            log.warning("⚠️  429 Too Many Requests — تخطى")
+            return None
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException as exc:
+        log.warning("GET %s فشل: %s", path, exc)
+        return None
 
+
+# ════════════════════════════════════════════════════════════════════════════
+#  أدوات التوقيت
+# ════════════════════════════════════════════════════════════════════════════
 
 def _server_to_utc(epoch_seconds: int) -> str:
-    """تحويل توقيت سيرفر الوسيط إلى UTC ISO (TimeCurrent أساسه توقيت السيرفر)."""
+    """تحويل توقيت سيرفر الوسيط إلى UTC ISO."""
     dt = datetime.fromtimestamp(epoch_seconds, tz=timezone.utc) - timedelta(
         hours=_state.get("tz_offset_hours", DEFAULT_TZ_OFFSET_HOURS)
     )
     return dt.isoformat()
 
 
-# ────────────── ضبط فارق التوقيت (استفادة من وثيقة Date&Time) ──────────────
 def _read_ea_offset_hours() -> float | None:
-    """الفارق الدقيق من EA رفيق يكتب TimeCurrent() - TimeGMT() في ملف JSON.
-    (دالتا TimeCurrent/TimeGMT بلغة MQL5 داخل الترمينال فقط — حزمة بايثون
-    لا تملكهما، لذا يمر الفارق الدقيق عبر ملف مثل التقويم)."""
+    """الفارق الدقيق من NexusTimeEA."""
     try:
-        with open(os.path.abspath(SERVER_TIME_FILE), "r", encoding="utf-8") as f:
-            data = json.load(f)
-        off = (float(data["server_time"]) - float(data["gmt_time"])) / 3600.0
+        paths = [os.path.abspath(SERVER_TIME_FILE)]
+        appdata = os.environ.get("APPDATA", "")
+        if appdata:
+            paths.append(os.path.join(
+                appdata, "MetaQuotes", "Terminal", "Common", "Files", SERVER_TIME_FILE))
+        for p in paths:
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return float(data.get("offset_hours", 0))
     except Exception:
-        return None  # لا ملف / ملف تالف → تجاهل بهدوء
-    if -13.0 <= off <= 13.0:
-        return round(off * 4) / 4  # أقرب ربع ساعة
+        pass
     return None
 
 
-def _measure_tick_offset_hours(symbols: dict[str, str]) -> float | None:
-    """قياس بلا EA: أحدث tick.time بتوقيت السيرفر − UTC الآن.
-    يعمل فقط عند نشاط السوق (tick طازج خلال ~10 دقائق) وإلا يرجع None."""
-    for _nexus_sym, mt5_sym in symbols.items():
-        t = mt5.symbol_info_tick(mt5_sym)
-        if not t or not t.time:
-            continue
-        est = float(t.time) - time.time()              # ثوانٍ
-        snapped = round(est / 1800.0) * 1800.0         # أقرب 30 دقيقة
-        if 0 <= est <= 13.5 * 3600 and abs(est - snapped) <= 600:
-            return snapped / 3600.0
-    return None
+def resolve_tz_offset() -> float:
+    """قياس/قراءة فارق توقيت السيرفر عن UTC."""
+    if os.path.exists(SERVER_TIME_FILE):
+        ea_off = _read_ea_offset_hours()
+        if ea_off is not None:
+            _state["tz_offset_hours"] = ea_off
+            return ea_off
 
-
-def resolve_tz_offset(symbols: dict[str, str], initial: bool = False) -> None:
-    """الأولوية: رقم ثابت في الإعدادات > ملف EA الرفيق > قياس tick > افتراضي."""
-    if isinstance(SERVER_TZ_OFFSET_HOURS, (int, float)):
+    if SERVER_TZ_OFFSET_HOURS != "auto":
         _state["tz_offset_hours"] = float(SERVER_TZ_OFFSET_HOURS)
-        if initial:
-            log.info("🕒 فارق التوقيت: ثابت %.1f ساعة (إعداد يدوي)", float(SERVER_TZ_OFFSET_HOURS))
-        return
-    ea = _read_ea_offset_hours()
-    if ea is not None:
-        changed = _state.get("tz_offset_hours") != ea
-        _state["tz_offset_hours"] = ea
-        if initial or changed:
-            log.info("🕒 فارق التوقيت: %+.2f ساعة (من ملف EA الرفيق — دقيق ويشمل التوقيت الصيفي)", ea)
-        return
-    measured = _measure_tick_offset_hours(symbols)
-    if measured is not None:
-        changed = _state.get("tz_offset_hours") != measured
-        _state["tz_offset_hours"] = measured
-        if initial or changed:
-            log.info("🕒 فارق التوقيت المقاس من أحدث tick: %+.1f ساعة%s",
-                     measured, "" if initial else " (تحديث تلقائي — غالباً تبديل توقيت صيفي)")
-        return
-    if initial:
-        log.warning("🕒 تعذر قياس الفارق (السوق مغلق على الأرجح) — استخدام %.1f ساعة مؤقتاً؛ "
-                    "سيُعاد القياس تلقائياً عند أول نشاط", DEFAULT_TZ_OFFSET_HOURS)
+        return float(SERVER_TZ_OFFSET_HOURS)
+
+    info = mt5.symbol_info_tick("XAUUSD")
+    if info and info.time:
+        server_time = datetime.fromtimestamp(info.time, tz=timezone.utc)
+        utc_now = datetime.now(timezone.utc)
+        offset = round((server_time - utc_now).total_seconds() / 3600)
+        _state["tz_offset_hours"] = float(offset)
+        log.info("🕒 فارق التوقيت المقاس من أحدث tick: +%s ساعة", offset)
+        return float(offset)
+
+    return DEFAULT_TZ_OFFSET_HOURS
 
 
-# ─────────────────────────────── الاتصال بـ MT5 ─────────────────────────────
-def connect_mt5() -> bool:
-    info = mt5.initialize()
-    if not info:
-        log.error("❌ فشل الاتصال بالترمينال: %s — تأكد أن MT5 مفتوح", mt5.last_error())
+# ════════════════════════════════════════════════════════════════════════════
+#  أدوات MT5 — معالجة numpy.void من copy_rates_from_pos (numpy 2.x)
+# ════════════════════════════════════════════════════════════════════════════
+# ملاحظة مهمة: في numpy 2.x، صفوف copy_rates_from_pos من نوع numpy.void
+# لا تدعم الوصول بالخاصية (b.time) بل فقط بالعنصر (b["time"]).
+# لذا نستخدم الوصول بالعنصر في كل مكان لضمان التوافق مع numpy 1.x و 2.x.
+
+def init_mt5() -> bool:
+    """تهيئة الاتصال بـ MT5."""
+    if not mt5.initialize():
+        log.error("❌ فشل initialize() — تأكد أن MT5 مفتوح")
         return False
+
     acc = mt5.account_info()
-    if acc:
-        mode = {0: "DEMO ✅", 1: "CONTEST", 2: "REAL ⚠️"}.get(
-            acc.trade_mode, str(acc.trade_mode)
-        )
-        log.info("✅ متصل: حساب %s | %s | %s | رصيد %.2f %s",
-                 acc.login, acc.server, mode, acc.balance, acc.currency)
-        if acc.trade_mode == 2 and EXECUTE and not ALLOW_REAL_ACCOUNT:
-            log.error("🛡️ حماية: حساب حقيقي + EXECUTE=True مرفوض. اجعل ALLOW_REAL_ACCOUNT=True عمداً أو استخدم حساب Demo.")
-            sys.exit(1)
-        _state["account"] = {
-            "login": acc.login, "server": acc.server,
-            "mode": mode, "balance": acc.balance,
-        }
-    ver = mt5.version()
-    log.info("✅ إصدار الترمينال: %s", ver)
+    if not acc:
+        log.error("❌ لا يوجد حساب — سجّل دخولك في MT5")
+        mt5.shutdown()
+        return False
+
+    is_demo = acc.trade_mode == 0  # 0 = demo
+    if not is_demo and not ALLOW_REAL_ACCOUNT:
+        log.error("❌ حساب حقيقي — فعّل ALLOW_REAL_ACCOUNT للمتابعة")
+        mt5.shutdown()
+        return False
+
+    log.info("✅ متصل: حساب %s | %s | %s | رصيد %.2f %s",
+             acc.login, acc.server, "DEMO ✅" if is_demo else "REAL ⚠️",
+             acc.balance, acc.currency)
+
+    term = mt5.terminal_info()
+    if term:
+        log.info("✅ إصدار الترمينال: %s", term.build)
+
+    for logical, broker in SYMBOL_MAP.items():
+        info = mt5.symbol_info(broker)
+        if not info:
+            log.warning("⚠️  الرمز %s غير موجود في Market Watch", broker)
+            continue
+        if not info.visible:
+            mt5.symbol_select(broker, True)
+        log.info("📌 %s → %s (digits=%d, point=%s)",
+                 logical, broker, info.digits, info.point)
+
     return True
 
 
-def resolve_symbols() -> dict[str, str]:
-    """التحقق من وجود الرموز في Market Watch وإرجاع الموجود فقط."""
-    ok: dict[str, str] = {}
-    for nexus_sym, mt5_sym in SYMBOL_MAP.items():
-        si = mt5.symbol_info(mt5_sym)
-        if si is None:
-            log.warning("⚠️ الرمز %s غير موجود في الترمينال — تجاهله (عدّل SYMBOL_MAP)", mt5_sym)
-            continue
-        if not si.visible:
-            mt5.symbol_select(mt5_sym, True)
-        ok[nexus_sym] = mt5_sym
-        log.info("📌 %s → %s (digits=%d, point=%g)",
-                 nexus_sym, mt5_sym, si.digits, si.point)
-    return ok
+def read_tick(logical: str, broker: str) -> dict | None:
+    """قراءة tick من MT5 — يستخدم info.time (TickInfo يدعم الخاصية)."""
+    info = mt5.symbol_info_tick(broker)
+    if not info:
+        return None
 
+    last = _state["last_tick"].get(logical)
+    if last and last[0] == info.time and last[1] == info.bid and last[2] == info.ask:
+        return None
 
-# ─────────────────────────────── حلقة التيكات ───────────────────────────────
-def tick_loop(symbols: dict[str, str]) -> None:
-    ticks = []
-    for nexus_sym, mt5_sym in symbols.items():
-        t = mt5.symbol_info_tick(mt5_sym)
-        if not t or not t.bid or not t.ask:
-            continue
-        key = (t.time, round(t.bid, 2), round(t.ask, 2))
-        if _state["last_tick"].get(nexus_sym) == key:
-            continue  # لا تغير → لا إرسال
-        _state["last_tick"][nexus_sym] = key
-        ticks.append({
-            "symbol": nexus_sym,
-            "bid": float(t.bid),
-            "ask": float(t.ask),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-        _state["last_tick_ts"] = datetime.now(timezone.utc).isoformat()
-    if ticks:
-        _post("/api/v2/bridge/ticks", {"ticks": ticks})
-
-
-# ─────────────────────────────── حلقة الشموع ────────────────────────────────
-def _field(row, name: str, default=0):
-    """قراءة حقل من صف rates بأمان — صفوف copy_rates مصفوفة numpy.void:
-    تدعم r[name] فقط ولا تملك .get()، وبعض نسخ MetaTrader5 القديمة
-    بلا حقل real_volume أصلاً — فنرجع الافتراضي بدل الانهيار."""
-    try:
-        v = row[name]
-    except Exception:  # ValueError/KeyError/IndexError حسب النوع
-        return default
-    return default if v is None else v
-
-
-def bars_loop(symbols: dict[str, str]) -> None:
-    for nexus_sym, mt5_sym in symbols.items():
-        rates = mt5.copy_rates_from_pos(mt5_sym, mt5.TIMEFRAME_M5, 0, SEED_BARS)
-        if rates is None or len(rates) == 0:
-            log.warning("⚠️ لا شموع لـ %s", mt5_sym)
-            continue
-        last_sent = _state["last_bar_ts"].get(nexus_sym)
-        bars = []
-        for r in rates:
-            ts_iso = _server_to_utc(int(r["time"]))
-            if last_sent and ts_iso <= last_sent:
-                continue
-            # حجم حقيقي (بورصة/عقود) إن توفّر وإلا حجم التيك (فوركس)
-            real_vol = int(_field(r, "real_volume", 0) or 0)
-            vol = float(real_vol) if real_vol > 0 else float(r["tick_volume"])
-            bars.append({
-                "symbol": nexus_sym,
-                "timeframe": "M5",
-                "open": float(r["open"]),
-                "high": float(r["high"]),
-                "low": float(r["low"]),
-                "close": float(r["close"]),
-                "volume": vol,
-                "spread": int(_field(r, "spread", 0) or 0),
-                "timestamp": ts_iso,
-            })
-        if not bars:
-            continue
-        seed = nexus_sym not in _state["seeded"]
-        payload_bars = bars if seed else bars[-5:]
-        res = _post("/api/v2/bridge/bars", {"bars": payload_bars})
-        if res and res.get("accepted") is not None:
-            _state["last_bar_ts"][nexus_sym] = bars[-1]["timestamp"]
-            if seed:
-                _state["seeded"].add(nexus_sym)
-                log.info("🌱 بذر %d شمعة لـ %s (accepted=%s)",
-                         len(payload_bars), nexus_sym, res.get("accepted"))
-            else:
-                log.info("📊 شمعة جديدة %s: close=%.2f vol=%d",
-                         nexus_sym, bars[-1]["close"], bars[-1]["volume"])
-
-
-# ─────────────────────────────── نبضة الحالة ────────────────────────────────
-def heartbeat(symbols: dict[str, str]) -> None:
-    """Market Information موسّعة: حالة الترمينال + الحساب + تفاصيل الرموز."""
-    payload: dict[str, Any] = {
-        "mode": "execute" if EXECUTE else "data-only",
-        "symbols": list(symbols.keys()),
-        "last_tick_ts": _state.get("last_tick_ts"),
-        "tz_offset_hours": _state.get("tz_offset_hours"),
+    _state["last_tick"][logical] = (info.time, info.bid, info.ask)
+    return {
+        "symbol": logical,
+        "bid": float(info.bid),
+        "ask": float(info.ask),
+        "timestamp": _server_to_utc(info.time),
     }
 
-    # TerminalInfo: هل زر Algo Trading مفعّل؟ هل الوسيط متصل؟
-    ti = mt5.terminal_info()
-    if ti:
-        payload["terminal"] = {
-            "name": ti.name,
-            "build": ti.build,
-            "company": ti.company,
-            "trade_allowed": bool(ti.trade_allowed),   # زر Algo Trading
-            "connected": bool(ti.connected),           # اتصال بسيرفر الوسيط
-            "ping_last_ms": int(ti.ping_last),
-        }
-        if EXECUTE and not ti.trade_allowed:
-            log.error("🚨 زر Algo Trading مفعّل؟ EXECUTE=True لكن trade_allowed=False — التنفيذ سيفشل!")
-        if not ti.connected:
-            log.warning("⚠️ الترمينال غير متصل بسيرفر الوسيط")
 
-    # AccountInfo: رصيد/حقوق/هامش/رافعة
+def read_bar(logical: str, broker: str, timeframe=mt5.TIMEFRAME_M5) -> dict | None:
+    """قراءة شمعة M5 — يستخدم b["time"] (متوافق مع numpy 2.x)."""
+    bars = mt5.copy_rates_from_pos(broker, timeframe, 0, 2)
+    if bars is None or len(bars) < 1:
+        return None
+
+    last = bars[-1]
+    # ⚠️ استخدام الوصول بالعنصر (وليس بالخاصية) لتوافق numpy 2.x
+    last_time = int(last["time"])
+    if _state["last_bar_ts"].get(logical) == last_time:
+        return None
+
+    _state["last_bar_ts"][logical] = last_time
+    return {
+        "symbol": logical,
+        "timeframe": "M5",
+        "bars": [{
+            "time": _server_to_utc(last_time),
+            "open": float(last["open"]),
+            "high": float(last["high"]),
+            "low": float(last["low"]),
+            "close": float(last["close"]),
+            "volume": int(last["tick_volume"]),
+        }],
+    }
+
+
+def seed_history(logical: str, broker: str) -> None:
+    """بذر تاريخ الشموع عند أول اتصال."""
+    if logical in _state["seeded"]:
+        return
+    bars = mt5.copy_rates_from_pos(broker, mt5.TIMEFRAME_M5, 0, SEED_BARS)
+    if bars is None or len(bars) == 0:
+        return
+
+    payload_bars = []
+    for b in bars:
+        # ⚠️ استخدام الوصول بالعنصر (وليس بالخاصية) لتوافق numpy 2.x
+        payload_bars.append({
+            "time": _server_to_utc(int(b["time"])),
+            "open": float(b["open"]),
+            "high": float(b["high"]),
+            "low": float(b["low"]),
+            "close": float(b["close"]),
+            "volume": int(b["tick_volume"]),
+        })
+
+    resp = _post("/api/v2/bridge/bars", {
+        "symbol": logical,
+        "timeframe": "M5",
+        "bars": payload_bars,
+    })
+    if resp:
+        log.info("🌱 بذر %d شمعة لـ %s", len(payload_bars), logical)
+        _state["seeded"].add(logical)
+        # حفظ آخر شمعة لتفادي إعادة إرسالها
+        _state["last_bar_ts"][logical] = int(bars[-1]["time"])
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  أدوات الإرسال — كل دالة ترسل طلب HTTP واحد فقط
+# ════════════════════════════════════════════════════════════════════════════
+
+def send_heartbeat() -> bool:
+    """إرسال نبضة الحالة إلى الخادم."""
     acc = mt5.account_info()
-    if acc:
-        mode = {0: "DEMO", 1: "CONTEST", 2: "REAL"}.get(acc.trade_mode, str(acc.trade_mode))
-        payload["account"] = {
-            "login": acc.login, "server": acc.server, "mode": mode,
-            "balance": acc.balance, "equity": acc.equity,
-            "margin": acc.margin, "free_margin": acc.margin_free,
-            "margin_level": acc.margin_level, "leverage": acc.leverage,
+    if not acc:
+        return False
+
+    payload = {
+        "account": {
+            "login": acc.login,
+            "server": acc.server,
+            "mode": "DEMO" if acc.trade_mode == 0 else "REAL",
+            "balance": float(acc.balance),
             "currency": acc.currency,
-        }
-
-    # تفاصيل الرموز (SymbolInfo): السبريد الحالي والسواب وقيود اللوت
-    details = {}
-    for nexus_sym, mt5_sym in symbols.items():
-        si = mt5.symbol_info(mt5_sym)
-        tk = mt5.symbol_info_tick(mt5_sym)
-        if not si:
-            continue
-        details[nexus_sym] = {
-            "mt5_symbol": mt5_sym,
-            "spread_points": int(tk.time and ((tk.ask - tk.bid) / si.point)) if (tk and si.point) else None,
-            "point": si.point, "digits": si.digits,
-            "volume_min": si.volume_min, "volume_max": si.volume_max,
-            "volume_step": si.volume_step,
-            "swap_long": si.swap_long, "swap_short": si.swap_short,
-            "trade_mode": si.trade_mode,
-        }
-    payload["symbols_detail"] = details
-    _post("/api/v2/bridge/heartbeat", payload)
+            "leverage": int(acc.leverage),
+            "equity": float(acc.equity),
+        },
+        "terminal": f"MT5 build {mt5.terminal_info().build if mt5.terminal_info() else '?'}",
+        "symbols": list(SYMBOL_MAP.keys()),
+        "mode": "data-only" if not EXECUTE else "execute",
+        "broker_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    resp = _post("/api/v2/bridge/heartbeat", payload)
+    return bool(resp)
 
 
-# ─────────────────────── خطاف التقويم الاقتصادي ─────────────────────────────
-def calendar_loop() -> None:
-    """يقرأ ملف تفريغ التقويم (من EA رفيق NexusCalendarEA.mq5) وينشره للخادم.
-    الوثائق: MQL5 Economic Calendar (CalendarValueHistory…) غير متاح في
-    حزمة بايثون — لذلك يمر عبر EA يكتب ملف JSON في مجلد Common Files.
-    بلا ملف = تجاهل صامت."""
-    for path in _calendar_candidates():
-        try:
-            mtime = os.path.getmtime(path)
-        except OSError:
-            continue  # لا ملف هنا — جرّب المسار التالي
-        mtimes = _state.setdefault("calendar_mtimes", {})
-        if mtime <= mtimes.get(path, 0.0):
-            return  # لم يتغير منذ آخر نشر
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                data = json.load(f)
-            events = data.get("events", data) if isinstance(data, dict) else data
-            if isinstance(events, list) and events:
-                res = _post("/api/v2/bridge/calendar", {"events": events[:200]})
-                if res:
-                    mtimes[path] = mtime
-                    log.info("📅 تقويم اقتصادي منشور: %d حدثاً (%s)",
-                             res.get("accepted", 0), path)
-                    return
-        except Exception as exc:
-            log.warning("قراءة ملف التقويم فشلت (%s): %s", path, exc)
+def send_tick(logical: str, broker: str) -> bool:
+    """إرسال tick واحد إلى الخادم."""
+    tick = read_tick(logical, broker)
+    if not tick:
+        return False
+    resp = _post("/api/v2/bridge/ticks", {"ticks": [tick]})
+    return bool(resp)
 
 
-# ──────────────────────── التنفيذ: قراءة وترتيب أوامر ───────────────────────
-def _normalize_volume(si, vol: float) -> float:
-    step = si.volume_step or 0.01
-    v = max(si.volume_min, min(si.volume_max, vol))
-    return round(round(v / step) * step, 8)
+def send_bar_if_new(logical: str, broker: str) -> bool:
+    """إرسال شمعة M5 جديدة (إن وُجدت)."""
+    bar = read_bar(logical, broker)
+    if not bar:
+        return False
+    resp = _post("/api/v2/bridge/bars", bar)
+    if resp:
+        log.info("📊 شمعة جديدة %s: close=%.2f vol=%d",
+                 logical, bar["bars"][0]["close"], bar["bars"][0]["volume"])
+        return True
+    return False
 
 
-def _order_send_safe(request: dict) -> Any:
-    res = mt5.order_send(request)
-    if res and res.retcode == 10030:  # filling mode غير مدعوم → جرّب FOK ثم RETURN
-        for fill in (mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN):
-            request["type_filling"] = fill
-            res = mt5.order_send(request)
-            if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-                break
-    return res
+def poll_decision(logical: str) -> None:
+    """فحص قرار الوكلاء وتنفيذه إن لزم."""
+    resp = _get(f"/api/agents/decision/{logical}")
+    if not resp:
+        return
+
+    cycle_id = resp.get("cycle_id")
+    if cycle_id and cycle_id != _state.get("last_decision_id"):
+        _state["last_decision_id"] = cycle_id
+        verdict = resp.get("verdict", "?")
+        conviction = resp.get("conviction", 0)
+        log.info("🤖 قرار جديد [%s]: %s (قناعة=%s)",
+                 logical, verdict, conviction)
+
+        if EXECUTE and verdict in ("BUY", "SELL"):
+            if conviction >= MIN_CONVICTION:
+                execute_decision(logical, verdict, conviction)
 
 
-def decision_loop(symbols: dict[str, str]) -> None:
-    """يقرأ آخر قرار من الوكلاء وينفذه إذا كان BUY/SELL بقناعة كافية."""
-    for nexus_sym, mt5_sym in symbols.items():
-        data = _get(f"/api/agents/decision/{nexus_sym}")
-        if not data:
-            continue
-        d = data.get("data", data) if isinstance(data, dict) else {}
-        verdict = str(d.get("verdict") or d.get("decision") or "").upper()
-        conviction = float(d.get("conviction") or d.get("confidence") or 0)
-        cid = str(d.get("cycle_id") or d.get("ts") or "")
-        if not cid or cid == _state["last_decision_id"]:
-            continue
-        _state["last_decision_id"] = cid
-        log.info("🧠 قرار جديد [%s]: %s قناعة=%.0f", cid[:8], verdict, conviction)
+def execute_decision(logical: str, verdict: str, conviction: int) -> None:
+    """تنفيذ قرار تداول في MT5 (يدويًا حتى الآن)."""
+    if not ALLOW_REAL_ACCOUNT:
+        return
+    broker = SYMBOL_MAP.get(logical)
+    if not broker:
+        return
 
-        if not EXECUTE:
-            log.info("   (وضع البيانات فقط — EXECUTE=False لن يُنفذ)")
-            continue
-        if verdict not in ("BUY", "SELL") or conviction < MIN_CONVICTION:
-            continue
+    log.info("⚡ تنفيذ %s %s lot=%s SL=%d TP=%d",
+             verdict, logical, LOT, SL_POINTS, TP_POINTS)
 
-        # صفقة واحدة كحد أقصى لكل رمز
-        if mt5.positions_get(symbol=mt5_sym):
-            log.info("   يوجد مركز مفتوح على %s — تجاهل", mt5_sym)
-            continue
+    tick = mt5.symbol_info_tick(broker)
+    if not tick:
+        return
+    price = tick.ask if verdict == "BUY" else tick.bid
+    info = mt5.symbol_info(broker)
+    if not info:
+        return
 
-        si = mt5.symbol_info(mt5_sym)
-        tk = mt5.symbol_info_tick(mt5_sym)
-        if not si or not tk:
-            continue
-        is_buy = verdict == "BUY"
-        price = tk.ask if is_buy else tk.bid
-        order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
-        point = si.point
-        req: dict[str, Any] = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": mt5_sym,
-            "volume": _normalize_volume(si, LOT),
-            "type": order_type,
-            "price": price,
-            "deviation": 30,
-            "magic": 20261026,
-            "comment": f"nexus {conviction:.0f}",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
-        if SL_POINTS > 0:
-            req["sl"] = round(price - SL_POINTS * point * 10, si.digits) if is_buy \
-                else round(price + SL_POINTS * point * 10, si.digits)
-        if TP_POINTS > 0:
-            req["tp"] = round(price + TP_POINTS * point * 10, si.digits) if is_buy \
-                else round(price - TP_POINTS * point * 10, si.digits)
+    point = info.point
+    sl = price - SL_POINTS * point if verdict == "BUY" else price + SL_POINTS * point
+    tp = price + TP_POINTS * point if verdict == "BUY" else price - TP_POINTS * point
 
-        res = _order_send_safe(req)
-        if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-            log.info("✅ نُفذت: %s #%d @ %.2f", verdict, res.order, res.price)
-        else:
-            log.error("❌ فشل التنفيذ: %s", getattr(res, "comment", mt5.last_error()))
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": broker,
+        "volume": float(LOT),
+        "type": mt5.ORDER_TYPE_BUY if verdict == "BUY" else mt5.ORDER_TYPE_SELL,
+        "price": price,
+        "sl": sl,
+        "tp": tp,
+        "deviation": 20,
+        "magic": 20241027,
+        "comment": f"nexus-{conviction}",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+    result = mt5.order_send(request)
+    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+        log.info("✅ تم التنفيذ: ticket=%s", result.order)
+    else:
+        log.error("❌ فشل التنفيذ: %s", result.comment if result else "no result")
 
 
-# ─────────────────────────────────── الرئيسية ───────────────────────────────
-def main() -> None:
+def send_calendar_if_changed() -> None:
+    """إرسال التقويم الاقتصادي إن تغيّر ملفه."""
+    paths = [os.path.abspath(CALENDAR_FILE)]
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        paths.append(os.path.join(
+            appdata, "MetaQuotes", "Terminal", "Common", "Files", CALENDAR_FILE))
+
+    calendar_path = None
+    for p in paths:
+        if os.path.exists(p):
+            calendar_path = p
+            break
+
+    if not calendar_path:
+        return
+
+    mtime = os.path.getmtime(calendar_path)
+    if mtime == _state["calendar_mtime"]:
+        return
+
+    try:
+        with open(calendar_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        events = data.get("events", [])
+        if not events:
+            return
+
+        payload = {"events": events}
+        resp = _post("/api/v2/bridge/calendar", payload)
+        if resp:
+            _state["calendar_mtime"] = mtime
+            log.info("📅 أرسل %d حدث تقويم", len(events))
+    except Exception as exc:
+        log.warning("⚠️  فشل قراءة التقويم: %s", exc)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  الحلقة الرئيسية — Single-Threaded Sequential (مفتاح حل 429)
+# ════════════════════════════════════════════════════════════════════════════
+
+def main_loop():
+    """حلقة واحدة متسلسلة — طلب HTTP واحد فقط في كل لحظة."""
     log.info("═══ NEXUS MT5 BRIDGE ═══")
     log.info("الخادم: %s", NEXUS_URL)
-    log.info("الوضع: %s", "تنفيذ فعلي ⚡" if EXECUTE else "بيانات فقط 📡")
+    log.info("الوضع: %s", "بيانات + تنفيذ ⚡" if EXECUTE else "بيانات فقط 📡")
+    log.info("التردد: tick=%.0fs | bar=%.0fs | heartbeat=%.0fs | decision=%.0fs",
+             POLL_TICKS_SEC, POLL_BARS_SEC, HEARTBEAT_SEC, DECISION_POLL_SEC)
 
-    if not connect_mt5():
+    if not init_mt5():
         sys.exit(1)
-    symbols = resolve_symbols()
-    if not symbols:
-        log.error("لا رموز صالحة — عدّل SYMBOL_MAP")
-        sys.exit(1)
-    resolve_tz_offset(symbols, initial=True)
 
-    last_bars = last_hb = last_dec = last_cal = last_tz = 0.0
+    resolve_tz_offset()
+
+    # بذر التاريخ لكل رمز
+    for logical, broker in SYMBOL_MAP.items():
+        seed_history(logical, broker)
+
+    # نبضة أولية
+    send_heartbeat()
+
+    # مؤشرات الوقت الأخيرة لكل حدث
+    last_heartbeat = time.time()
+    last_bar_check = time.time()
+    last_decision = 0
+    last_calendar = 0
+    last_tz_recheck = time.time()
+
+    log.info("🚀 بدء الحلقة الرئيسية (single-threaded)")
+
     try:
         while True:
-            now = time.monotonic()
-            try:
-                if not mt5.terminal_info():
-                    log.warning("الترمينال انفصل — إعادة الاتصال…")
-                    time.sleep(3)
-                    if not connect_mt5():
-                        continue
-                tick_loop(symbols)
-                if now - last_bars >= POLL_BARS_SEC:
-                    bars_loop(symbols)
-                    last_bars = now
-                if now - last_hb >= HEARTBEAT_SEC:
-                    heartbeat(symbols)
-                    last_hb = now
-                if now - last_dec >= DECISION_POLL_SEC:
-                    decision_loop(symbols)
-                    last_dec = now
-                if now - last_cal >= CALENDAR_POLL_SEC:
-                    calendar_loop()
-                    last_cal = now
-                if now - last_tz >= TZ_RECHECK_SEC:
-                    resolve_tz_offset(symbols)  # يلتقط تبديل التوقيت الصيفي تلقائياً
-                    last_tz = now
-            except KeyboardInterrupt:
-                raise
-            except Exception:
-                log.exception("خطأ في الحلقة — الاستمرار")
+            now = time.time()
+
+            # 1) tick — كل POLL_TICKS_SEC
+            for logical, broker in SYMBOL_MAP.items():
+                try:
+                    send_tick(logical, broker)
+                except Exception as exc:
+                    log.warning("tick فشل: %s", exc)
+
+            # 2) heartbeat — كل HEARTBEAT_SEC
+            if now - last_heartbeat >= HEARTBEAT_SEC:
+                try:
+                    send_heartbeat()
+                    last_heartbeat = now
+                except Exception as exc:
+                    log.warning("heartbeat فشل: %s", exc)
+
+            # 3) bar check — كل POLL_BARS_SEC
+            if now - last_bar_check >= POLL_BARS_SEC:
+                try:
+                    for logical, broker in SYMBOL_MAP.items():
+                        send_bar_if_new(logical, broker)
+                except Exception as exc:
+                    log.warning("bar check فشل: %s", exc)
+                last_bar_check = now
+
+            # 4) decision poll — كل DECISION_POLL_SEC
+            if now - last_decision >= DECISION_POLL_SEC:
+                try:
+                    for logical in SYMBOL_MAP:
+                        poll_decision(logical)
+                except Exception as exc:
+                    log.warning("decision poll فشل: %s", exc)
+                last_decision = now
+
+            # 5) calendar — كل CALENDAR_POLL_SEC
+            if now - last_calendar >= CALENDAR_POLL_SEC:
+                try:
+                    send_calendar_if_changed()
+                except Exception as exc:
+                    log.warning("calendar فشل: %s", exc)
+                last_calendar = now
+
+            # 6) إعادة قياس فارق التوقيت كل TZ_RECHECK_SEC
+            if now - last_tz_recheck >= TZ_RECHECK_SEC:
+                try:
+                    resolve_tz_offset()
+                except Exception:
+                    pass
+                last_tz_recheck = now
+
+            # انتظار قصير قبل الدورة التالية
             time.sleep(POLL_TICKS_SEC)
+
     except KeyboardInterrupt:
-        log.info("⏹️ إيقاف بواسطة المستخدم")
+        log.info("⏹️  إيقاف الجسر...")
     finally:
         mt5.shutdown()
-        log.info("تم الإغلاق")
+        log.info("تم الإيقاف.")
 
 
 if __name__ == "__main__":
-    main()
+    main_loop()

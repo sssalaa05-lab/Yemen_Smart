@@ -3,8 +3,9 @@
 //|  EA رفيق لنظام Nexus — يفرّغ التقويم الاقتصادي من ميتاتريدر 5    |
 //|  إلى ملف JSON يقرؤه bridge.py وينشره للخادم.                     |
 //|                                                                  |
-//|  لماذا EA؟ حزمة MetaTrader5 لبايثون لا تستطيع قراءة التقويم      |
-//|  الاقتصادي أو الأخبار — القراءة ممكنة فقط من داخل MQL5.          |
+//|  v1.01 — إصلاح أخطاء التجميع:                                   |
+//|    - إزالة CALENDAR_MULTIPLIER_PERCENT (غير موجود في MQL5)       |
+//|    - إصلاح تحويل long→datetime بأمر صريح                        |
 //|                                                                  |
 //|  التثبيت:                                                        |
 //|   1) MetaEditor (F4) → مجلد Experts → الملف هنا → Compile (F7)   |
@@ -12,7 +13,7 @@
 //|   3) اتركه يعمل — يكتب الملف كل 5 دقائق في مجلد Common\Files     |
 //+------------------------------------------------------------------+
 #property copyright "Nexus Trading System"
-#property version   "1.00"
+#property version   "1.01"
 #property description "يفرّغ التقويم الاقتصادي MT5 إلى calendar_dump.json لجسر Nexus"
 
 #property strict
@@ -65,26 +66,35 @@ string Sanitize(const string src)
    return outp;
   }
 
-// تنسيق القيمة الرقمية مع وحدة المضاعف
+//+------------------------------------------------------------------+
+//| تنسيق القيمة الرقمية مع وحدة المضاعف                              |
+//| ملاحظة: CALENDAR_MULTIPLIER_PERCENT غير موجود في MQL5 —          |
+//|        النسبة المئوية تُضاف تلقائيًا عبر digits عند بعض الوسطاء   |
+//+------------------------------------------------------------------+
 string FormatValue(const MqlCalendarEvent &ev, const long raw)
   {
    double v = (double)raw / MathPow(10.0, (double)ev.digits);
    string s = DoubleToString(v, (int)ev.digits);
+
    switch(ev.multiplier)
      {
-      case CALENDAR_MULTIPLIER_PERCENT:   s += "%"; break;
       case CALENDAR_MULTIPLIER_THOUSANDS: s += "K"; break;
       case CALENDAR_MULTIPLIER_MILLIONS:  s += "M"; break;
       case CALENDAR_MULTIPLIER_BILLIONS:  s += "B"; break;
       case CALENDAR_MULTIPLIER_TRILLIONS: s += "T"; break;
-      default: break;
+      default: break;  // NONE أو أي قيمة أخرى (النسبة المئوية لا تحتاج لاحقة)
      }
    return s;
   }
 
+//+------------------------------------------------------------------+
+//| تنسيق التوقيت بصيغة ISO UTC                                      |
+//| ملاحظة: تحويل صريح من long إلى datetime لتفادي التحذير            |
+//+------------------------------------------------------------------+
 string IsoUtc(const datetime server_time, const long tz_offset_sec)
   {
-   datetime utc = server_time - tz_offset_sec;
+   // تحويل صريح بأمر (datetime) لتفادي تحذير فقدان البيانات
+   datetime utc = (datetime)((long)server_time - tz_offset_sec);
    MqlDateTime t;
    TimeToStruct(utc, t);
    return StringFormat("%04d-%02d-%02dT%02d:%02d:%02dZ",
@@ -97,10 +107,12 @@ string IsoUtc(const datetime server_time, const long tz_offset_sec)
 void DumpCalendar()
   {
    datetime server_now = TimeTradeServer();
-   long tz_off = (long)TimeTradeServer() - (long)TimeGMT(); // إزاحة توقيت الخادم
+   // تحويل صريح بأمر (long) لتفادي تحذير فقدان البيانات
+   long tz_off = (long)((long)TimeTradeServer() - (long)TimeGMT());
 
-   datetime from = server_now - (datetime)(InpDaysBack * 86400);
-   datetime to   = server_now + (datetime)(InpDaysAhead * 86400);
+   // تحويل صريح بأمر (datetime) بعد ضرب long (تفادي الفيض)
+   datetime from = (datetime)((long)server_now - (long)InpDaysBack * 86400);
+   datetime to   = (datetime)((long)server_now + (long)InpDaysAhead * 86400);
 
    MqlCalendarValue values[];
    ResetLastError();
