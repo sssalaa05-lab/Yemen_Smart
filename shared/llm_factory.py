@@ -1,14 +1,15 @@
 """
 Unified LLM factory — choose the AI provider via ``NEXUS_LLM_PROVIDER``.
 
-DeepSeek (default), OpenAI (GPT) and Google Gemini all expose an
+DeepSeek, OpenAI (GPT), Google Gemini, and Z.ai (GLM-4.5-Flash) all expose an
 OpenAI-compatible chat endpoint, so a single ``ChatOpenAI`` client serves all
-three — only ``base_url``, the API-key env var and the default model differ.
+of them — only ``base_url``, the API-key env var and the default model differ.
 ``local`` targets an Ollama (or any OpenAI-compatible) server.
 
 Set the provider in ``.env``::
 
-    NEXUS_LLM_PROVIDER=deepseek     # deepseek (default) | openai | gemini | local
+    NEXUS_LLM_PROVIDER=zai          # zai (default) | deepseek | openai | gemini | local
+    NEXUS_LLM_API_KEY=...           # for zai (GLM-4.5-Flash, free tier)
     DEEPSEEK_API_KEY=...            # for deepseek
     OPENAI_API_KEY=...              # for openai / gpt
     GEMINI_API_KEY=...              # for gemini
@@ -23,6 +24,8 @@ import os
 
 # provider -> (base_url, api_key_env_var, default_model)
 _PROVIDERS: dict[str, tuple[str, str, str]] = {
+    "zai":      ("https://api.z.ai/api/paas/v4", "NEXUS_LLM_API_KEY", "glm-4.5-flash"),
+    "bigmodel": ("https://open.bigmodel.cn/api/paas/v4", "NEXUS_LLM_API_KEY", "glm-4.5-flash"),
     "deepseek": ("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", "deepseek-chat"),
     "openai":   ("https://api.openai.com/v1", "OPENAI_API_KEY", "gpt-4o-mini"),
     "gemini":   ("https://generativelanguage.googleapis.com/v1beta/openai/", "GEMINI_API_KEY", "gemini-2.0-flash"),
@@ -30,7 +33,10 @@ _PROVIDERS: dict[str, tuple[str, str, str]] = {
 
 # Friendly aliases so both "gpt" and "openai", "cloud" and "deepseek", etc. work.
 _ALIASES: dict[str, str] = {
-    "cloud": "deepseek",
+    "cloud": "zai",
+    "glm": "zai",
+    "z.ai": "zai",
+    "chatglm": "zai",
     "gpt": "openai",
     "chatgpt": "openai",
     "openai-gpt": "openai",
@@ -38,8 +44,8 @@ _ALIASES: dict[str, str] = {
     "google-gemini": "gemini",
 }
 
-DEFAULT_PROVIDER = "deepseek"
-SUPPORTED_PROVIDERS = ("deepseek", "openai", "gemini", "local")
+DEFAULT_PROVIDER = "zai"
+SUPPORTED_PROVIDERS = ("zai", "bigmodel", "deepseek", "openai", "gemini", "local")
 
 
 def resolve_provider() -> str:

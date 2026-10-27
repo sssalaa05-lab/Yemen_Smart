@@ -1,7 +1,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Nexus Trader — Global Python Dependencies
+# Yemen Smart (Nexus Trading System MT5) — Linux Dev Dependencies
 # ─────────────────────────────────────────────────────────────────────────────
 # Install:  pip install -r requirements.txt
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTE: MetaTrader5 is Windows-only and is excluded.
+# NOTE: mlflow/prefect are not used in the code and excluded to save space.
+# NOTE: torch is CPU-only (no CUDA).
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Web framework & server ───────────────────────────────────────────────────
@@ -27,42 +31,38 @@ redis[hiredis]>=5.1.0,<6.0
 duckdb>=1.1.0,<2.0
 
 # ── Technical analysis ──────────────────────────────────────────────────────
-# pandas-ta on PyPI requires Python >=3.12; shared/pandas_ta_compat falls back to classic on 3.11
 pandas-ta-classic>=0.4.47,<0.5
 ta>=0.11.0
 quantstats>=0.0.62
 
-# ── Machine learning ────────────────────────────────────────────────────────
+# ── Machine learning (CPU-only) ─────────────────────────────────────────────
 scikit-learn>=1.5.0,<2.0
 xgboost>=2.1.0,<3.0
 lightgbm>=4.5.0,<5.0
-torch>=2.4.0,<3.0
+# torch installed separately as CPU-only wheel (see below)
 transformers>=4.44.0,<5.0
 hmmlearn>=0.3.0,<1.0
 stable-baselines3>=2.3.0,<3.0
 gymnasium>=0.29.0,<1.0
 
-# ── LLM & agents ────────────────────────────────────────────────────────────
+# ── LLM & agents (Z.ai cloud — uses OpenAI-compatible client) ───────────────
 langchain>=0.3.0,<1.0
 langgraph>=0.2.0,<1.0
-langchain-openai>=0.2.0,<1.0    # used for DeepSeek (OpenAI-compatible)
+langchain-openai>=0.2.0,<1.0
+openai>=1.40.0,<2.0           # for Z.ai OpenAI-compatible API
 
-# ── Brokers & market data ───────────────────────────────────────────────────
-MetaTrader5>=5.0.4200
-ib_insync>=0.9.86
+# ── Brokers & market data (no MT5 on Linux) ─────────────────────────────────
+# MetaTrader5  # EXCLUDED — Windows-only
+# ib_insync    # not needed for dev
 ccxt>=4.4.0,<5.0
 yfinance>=0.2.43,<1.0
-
-# ── Experiment tracking & orchestration ──────────────────────────────────────
-mlflow>=2.16.0,<3.0
-prefect>=3.0.0,<4.0
 
 # ── Observability ────────────────────────────────────────────────────────────
 structlog>=24.4.0,<26.0
 prometheus-client>=0.21.0,<1.0
 
 # ── Notifications ────────────────────────────────────────────────────────────
-python-telegram-bot>=21.5,<22.0
+# python-telegram-bot  # not needed for dev
 
 # ── HTTP & networking ────────────────────────────────────────────────────────
 httpx>=0.27.0,<1.0

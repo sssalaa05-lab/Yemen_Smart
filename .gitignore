@@ -47,6 +47,20 @@ data/
 *.parquet
 *.pkl
 *.joblib
+*.h5
+*.pt
+*.pth
+*.onnx
+
+# ── Redis data (binary, contains training history) ───────────
+dump.rdb
+*.rdb
+*.wal
+redis-data/
+redis-logs/
+
+# ── Local dev artifacts ───────────────────────────────────────
+scripts/bin/
 
 # ── Logs ───────────────────────────────────────────────────────
 *.log
