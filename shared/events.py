@@ -76,6 +76,17 @@ class TickEvent(Event):
     bid: float = 0.0
     ask: float = 0.0
     spread: float = 0.0
+    source_id: str | None = None
+    provider: str | None = None
+    broker: str | None = None
+    server: str | None = None
+    logical_symbol: str | None = None
+    raw_symbol: str | None = None
+    contract_snapshot_id: str | None = None
+    time_msc: int | None = None
+    last: float | None = None
+    volume_real: float | None = None
+    flags: int | None = None
 
 
 class OHLCVEvent(Event):
@@ -87,6 +98,14 @@ class OHLCVEvent(Event):
     low: float = 0.0
     close: float = 0.0
     volume: float = 0.0
+    source_id: str | None = None
+    provider: str | None = None
+    broker: str | None = None
+    server: str | None = None
+    logical_symbol: str | None = None
+    raw_symbol: str | None = None
+    contract_snapshot_id: str | None = None
+    real_volume: float | None = None
 
 
 class SignalEvent(Event):

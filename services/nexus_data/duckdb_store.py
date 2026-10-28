@@ -7,7 +7,9 @@ Includes automatic data-retention pruning.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,6 +39,7 @@ class DataStore:
     def __init__(self, db_path: str = "./data/nexus.duckdb") -> None:
         self._db_path = db_path
         self._conn: Any | None = None
+        self._lock = threading.RLock()
 
     @property
     def is_open(self) -> bool:
@@ -122,9 +125,30 @@ class DataStore:
                 bid        DOUBLE    NOT NULL,
                 ask        DOUBLE    NOT NULL,
                 spread     DOUBLE    NOT NULL DEFAULT 0,
-                timestamp  TIMESTAMP WITH TIME ZONE NOT NULL
+                timestamp  TIMESTAMP WITH TIME ZONE NOT NULL,
+                source_id  VARCHAR,
+                provider   VARCHAR,
+                broker     VARCHAR,
+                server     VARCHAR,
+                logical_symbol VARCHAR,
+                raw_symbol VARCHAR,
+                contract_snapshot_id VARCHAR,
+                time_msc   BIGINT,
+                last       DOUBLE,
+                volume     DOUBLE,
+                volume_real DOUBLE,
+                flags      BIGINT
             )
         """)
+        for column, dtype in (
+            ("source_id", "VARCHAR"), ("provider", "VARCHAR"),
+            ("broker", "VARCHAR"), ("server", "VARCHAR"),
+            ("logical_symbol", "VARCHAR"), ("raw_symbol", "VARCHAR"),
+            ("contract_snapshot_id", "VARCHAR"), ("time_msc", "BIGINT"),
+            ("last", "DOUBLE"), ("volume", "DOUBLE"),
+            ("volume_real", "DOUBLE"), ("flags", "BIGINT"),
+        ):
+            self._conn.execute(f"ALTER TABLE ticks ADD COLUMN IF NOT EXISTS {column} {dtype}")
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS ohlcv (
                 symbol     VARCHAR   NOT NULL,
@@ -134,7 +158,94 @@ class DataStore:
                 low        DOUBLE    NOT NULL,
                 close      DOUBLE    NOT NULL,
                 volume     DOUBLE    NOT NULL DEFAULT 0,
-                timestamp  TIMESTAMP WITH TIME ZONE NOT NULL
+                timestamp  TIMESTAMP WITH TIME ZONE NOT NULL,
+                source_id  VARCHAR,
+                provider   VARCHAR,
+                broker     VARCHAR,
+                server     VARCHAR,
+                logical_symbol VARCHAR,
+                raw_symbol VARCHAR,
+                contract_snapshot_id VARCHAR,
+                real_volume DOUBLE
+            )
+        """)
+        for column, dtype in (
+            ("source_id", "VARCHAR"), ("provider", "VARCHAR"),
+            ("broker", "VARCHAR"), ("server", "VARCHAR"),
+            ("logical_symbol", "VARCHAR"), ("raw_symbol", "VARCHAR"),
+            ("contract_snapshot_id", "VARCHAR"), ("real_volume", "DOUBLE"),
+        ):
+            self._conn.execute(f"ALTER TABLE ohlcv ADD COLUMN IF NOT EXISTS {column} {dtype}")
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS contract_snapshots (
+                snapshot_id VARCHAR PRIMARY KEY,
+                source_id VARCHAR NOT NULL,
+                provider VARCHAR NOT NULL,
+                broker VARCHAR,
+                server VARCHAR,
+                logical_symbol VARCHAR NOT NULL,
+                raw_symbol VARCHAR NOT NULL,
+                observed_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                spec_json JSON NOT NULL
+            )
+        """)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS calendar_revisions (
+                event_id VARCHAR NOT NULL,
+                revision_id VARCHAR NOT NULL,
+                event_time TIMESTAMP WITH TIME ZONE,
+                available_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                source VARCHAR NOT NULL,
+                event_json JSON NOT NULL,
+                PRIMARY KEY (event_id, revision_id)
+            )
+        """)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS source_ticks (
+                source_id VARCHAR NOT NULL,
+                provider VARCHAR NOT NULL,
+                broker VARCHAR,
+                server VARCHAR,
+                logical_symbol VARCHAR NOT NULL,
+                raw_symbol VARCHAR NOT NULL,
+                contract_snapshot_id VARCHAR,
+                time_msc BIGINT NOT NULL,
+                timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+                fingerprint VARCHAR NOT NULL,
+                bid DOUBLE NOT NULL,
+                ask DOUBLE NOT NULL,
+                last DOUBLE NOT NULL DEFAULT 0,
+                volume DOUBLE NOT NULL DEFAULT 0,
+                volume_real DOUBLE NOT NULL DEFAULT 0,
+                flags BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY (source_id, raw_symbol, time_msc, fingerprint)
+            )
+        """)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS tick_batch_chunks (
+                source_id VARCHAR NOT NULL,
+                raw_symbol VARCHAR NOT NULL,
+                batch_id VARCHAR NOT NULL,
+                window_start_ms BIGINT NOT NULL,
+                window_end_ms BIGINT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                chunk_count INTEGER NOT NULL,
+                tick_count INTEGER NOT NULL,
+                received_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                PRIMARY KEY (source_id, raw_symbol, batch_id, chunk_index)
+            )
+        """)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS tick_ingestion_windows (
+                source_id VARCHAR NOT NULL,
+                raw_symbol VARCHAR NOT NULL,
+                batch_id VARCHAR NOT NULL,
+                window_start_ms BIGINT NOT NULL,
+                covered_through_ms BIGINT NOT NULL,
+                chunk_count INTEGER NOT NULL,
+                tick_count INTEGER NOT NULL,
+                recorded_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                PRIMARY KEY (source_id, raw_symbol, batch_id)
             )
         """)
         self._conn.execute("""
@@ -185,21 +296,241 @@ class DataStore:
 
     async def insert_tick(self, tick: Tick) -> None:
         await self._run(
-            "INSERT INTO ticks (symbol, bid, ask, spread, timestamp) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (tick.symbol, tick.bid, tick.ask, tick.spread, tick.timestamp),
+            "INSERT INTO ticks (symbol, bid, ask, spread, timestamp, source_id, provider, "
+            "broker, server, logical_symbol, raw_symbol, contract_snapshot_id, time_msc, "
+            "last, volume, volume_real, flags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (tick.symbol, tick.bid, tick.ask, tick.spread, tick.timestamp, tick.source_id,
+             tick.provider, tick.broker, tick.server, tick.logical_symbol, tick.raw_symbol,
+             tick.contract_snapshot_id, tick.time_msc, tick.last, tick.volume,
+             tick.volume_real, tick.flags),
         )
 
     async def insert_ohlcv(self, bar: OHLCV) -> None:
         await self._run(
             "INSERT INTO ohlcv "
-            "(symbol, timeframe, open, high, low, close, volume, timestamp) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "(symbol, timeframe, open, high, low, close, volume, timestamp, source_id, provider, "
+            "broker, server, logical_symbol, raw_symbol, contract_snapshot_id, real_volume) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 bar.symbol, bar.timeframe, bar.open, bar.high,
-                bar.low, bar.close, bar.volume, bar.timestamp,
+                bar.low, bar.close, bar.volume, bar.timestamp, bar.source_id,
+                bar.provider, bar.broker, bar.server, bar.logical_symbol,
+                bar.raw_symbol, bar.contract_snapshot_id, bar.real_volume,
             ),
         )
+
+    async def persist_tick_batch_chunk(
+        self,
+        *,
+        source: dict[str, Any],
+        contract_snapshot: dict[str, Any] | None,
+        batch_id: str,
+        window_start_ms: int,
+        window_end_ms: int,
+        chunk_index: int,
+        chunk_count: int,
+        ticks: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Idempotently persist a chunk; ack coverage only after all chunks exist."""
+        if chunk_count < 1 or not 0 <= chunk_index < chunk_count:
+            raise ValueError("invalid tick batch chunk coordinates")
+        loop = asyncio.get_running_loop()
+
+        def _job() -> dict[str, Any]:
+            assert self._conn is not None
+            with self._lock:
+                conn = self._conn
+                conn.execute("BEGIN TRANSACTION")
+                try:
+                    if contract_snapshot:
+                        conn.execute(
+                            "INSERT INTO contract_snapshots "
+                            "(snapshot_id, source_id, provider, broker, server, logical_symbol, "
+                            "raw_symbol, observed_at, spec_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                            "ON CONFLICT (snapshot_id) DO NOTHING",
+                            (contract_snapshot["snapshot_id"], source["source_id"],
+                             source["provider"], source.get("broker"), source.get("server"),
+                             source["logical_symbol"], source["raw_symbol"],
+                             datetime.fromisoformat(contract_snapshot["observed_at"]),
+                             json.dumps(contract_snapshot["specs"], sort_keys=True)),
+                        )
+                    for tick in ticks:
+                        normalized_ts = datetime.fromisoformat(tick["timestamp"])
+                        snapshot_id = contract_snapshot.get("snapshot_id") if contract_snapshot else None
+                        time_msc = int(tick["time_msc"])
+                        fingerprint = tick["fingerprint"]
+                        conn.execute(
+                            "INSERT INTO source_ticks "
+                            "(source_id, provider, broker, server, logical_symbol, raw_symbol, "
+                            "contract_snapshot_id, time_msc, timestamp, fingerprint, bid, ask, "
+                            "last, volume, volume_real, flags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                            "ON CONFLICT (source_id, raw_symbol, time_msc, fingerprint) DO NOTHING",
+                            (source["source_id"], source["provider"], source.get("broker"),
+                             source.get("server"), source["logical_symbol"], source["raw_symbol"],
+                             snapshot_id, time_msc, normalized_ts,
+                             fingerprint, float(tick["bid"]), float(tick["ask"]),
+                             float(tick.get("last") or 0), float(tick.get("volume") or 0),
+                             float(tick.get("volume_real") or 0), int(tick.get("flags") or 0)),
+                        )
+                        conn.execute(
+                            "INSERT INTO ticks (symbol, bid, ask, spread, timestamp, source_id, provider, "
+                            "broker, server, logical_symbol, raw_symbol, contract_snapshot_id, time_msc, "
+                            "last, volume, volume_real, flags) "
+                            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
+                            "WHERE NOT EXISTS (SELECT 1 FROM ticks WHERE source_id=? AND raw_symbol=? "
+                            "AND time_msc=? AND bid=? AND ask=? AND last=? AND volume=? AND volume_real=? AND flags=?)",
+                            (source["logical_symbol"], float(tick["bid"]), float(tick["ask"]),
+                             float(tick["ask"]) - float(tick["bid"]), normalized_ts,
+                             source["source_id"], source["provider"], source.get("broker"),
+                             source.get("server"), source["logical_symbol"], source["raw_symbol"],
+                             snapshot_id, time_msc, float(tick.get("last") or 0),
+                             float(tick.get("volume") or 0), float(tick.get("volume_real") or 0),
+                             int(tick.get("flags") or 0), source["source_id"], source["raw_symbol"],
+                             time_msc, float(tick["bid"]), float(tick["ask"]),
+                             float(tick.get("last") or 0), float(tick.get("volume") or 0),
+                             float(tick.get("volume_real") or 0), int(tick.get("flags") or 0)),
+                        )
+                    prior = conn.execute(
+                        "SELECT chunk_count, window_start_ms, window_end_ms FROM tick_batch_chunks "
+                        "WHERE source_id=? AND raw_symbol=? AND batch_id=? LIMIT 1",
+                        (source["source_id"], source["raw_symbol"], batch_id),
+                    ).fetchone()
+                    if prior and tuple(map(int, prior)) != (chunk_count, window_start_ms, window_end_ms):
+                        raise ValueError("batch_id reused with different range metadata")
+                    conn.execute(
+                        "INSERT INTO tick_batch_chunks "
+                        "(source_id, raw_symbol, batch_id, window_start_ms, window_end_ms, "
+                        "chunk_index, chunk_count, tick_count, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT (source_id, raw_symbol, batch_id, chunk_index) DO NOTHING",
+                        (source["source_id"], source["raw_symbol"], batch_id, window_start_ms,
+                         window_end_ms, chunk_index, chunk_count, len(ticks), datetime.now(timezone.utc)),
+                    )
+                    counts = conn.execute(
+                        "SELECT COUNT(DISTINCT chunk_index), COALESCE(SUM(tick_count), 0) "
+                        "FROM tick_batch_chunks WHERE source_id=? AND raw_symbol=? AND batch_id=? "
+                        "AND chunk_count=? AND window_start_ms=? AND window_end_ms=?",
+                        (source["source_id"], source["raw_symbol"], batch_id,
+                         chunk_count, window_start_ms, window_end_ms),
+                    ).fetchone()
+                    complete = int(counts[0]) == chunk_count
+                    total_ticks = int(counts[1])
+                    if complete:
+                        conn.execute(
+                            "INSERT INTO tick_ingestion_windows "
+                            "(source_id, raw_symbol, batch_id, window_start_ms, covered_through_ms, "
+                            "chunk_count, tick_count, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                            "ON CONFLICT (source_id, raw_symbol, batch_id) DO UPDATE SET "
+                            "tick_count=excluded.tick_count, recorded_at=excluded.recorded_at",
+                            (source["source_id"], source["raw_symbol"], batch_id, window_start_ms,
+                             window_end_ms, chunk_count, total_ticks, datetime.now(timezone.utc)),
+                        )
+                    conn.execute("COMMIT")
+                    return {
+                        "accepted": len(ticks), "received": len(ticks), "rejected": 0,
+                        "chunk_index": chunk_index, "chunk_count": chunk_count,
+                        "window_complete": complete,
+                        "covered_through_ms": window_end_ms if complete else None,
+                        "tick_count_in_window": total_ticks if complete else None,
+                        "coverage_is_completeness_proof": False,
+                    }
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+
+        return await loop.run_in_executor(_POOL, _job)
+
+    async def persist_source_bars(
+        self,
+        *,
+        source: dict[str, Any],
+        contract_snapshot: dict[str, Any] | None,
+        bars: list[dict[str, Any]],
+    ) -> None:
+        """Persist broker identity and contract snapshot before logical aliasing."""
+        loop = asyncio.get_running_loop()
+
+        def _job() -> None:
+            assert self._conn is not None
+            with self._lock:
+                conn = self._conn
+                conn.execute("BEGIN TRANSACTION")
+                try:
+                    if contract_snapshot:
+                        conn.execute(
+                            "INSERT INTO contract_snapshots "
+                            "(snapshot_id, source_id, provider, broker, server, logical_symbol, "
+                            "raw_symbol, observed_at, spec_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                            "ON CONFLICT (snapshot_id) DO NOTHING",
+                            (contract_snapshot["snapshot_id"], source["source_id"], source["provider"],
+                             source.get("broker"), source.get("server"), source["logical_symbol"],
+                             source["raw_symbol"], datetime.fromisoformat(contract_snapshot["observed_at"]),
+                             json.dumps(contract_snapshot["specs"], sort_keys=True)),
+                        )
+                    for bar in bars:
+                        conn.execute(
+                            "INSERT INTO ohlcv (symbol, timeframe, open, high, low, close, volume, timestamp, "
+                            "source_id, provider, broker, server, logical_symbol, raw_symbol, "
+                            "contract_snapshot_id, real_volume) "
+                            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
+                            "WHERE NOT EXISTS (SELECT 1 FROM ohlcv WHERE symbol=? AND timeframe=? AND timestamp=? "
+                            "AND source_id=? AND server IS NOT DISTINCT FROM ? AND raw_symbol=?)",
+                            (source["logical_symbol"], bar["timeframe"], float(bar["open"]),
+                             float(bar["high"]), float(bar["low"]), float(bar["close"]),
+                             float(bar.get("volume") or 0), datetime.fromisoformat(bar["timestamp"]),
+                             source["source_id"], source["provider"], source.get("broker"),
+                             source.get("server"), source["logical_symbol"], source["raw_symbol"],
+                             contract_snapshot.get("snapshot_id") if contract_snapshot else None,
+                             float(bar.get("real_volume") or 0), source["logical_symbol"],
+                             bar["timeframe"], datetime.fromisoformat(bar["timestamp"]),
+                             source["source_id"], source.get("server"), source["raw_symbol"]),
+                        )
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+
+        await loop.run_in_executor(_POOL, _job)
+
+    async def persist_calendar_revisions(self, events: list[dict[str, Any]]) -> int:
+        """Append observed calendar vintages without replacing previous revisions."""
+        if not events:
+            return 0
+        loop = asyncio.get_running_loop()
+
+        def _job() -> int:
+            assert self._conn is not None
+            with self._lock:
+                conn = self._conn
+                conn.execute("BEGIN TRANSACTION")
+                try:
+                    before = int(conn.execute("SELECT COUNT(*) FROM calendar_revisions").fetchone()[0])
+                    for event in events:
+                        event_time = event.get("time")
+                        def _utc(value: str | None) -> datetime | None:
+                            if not value:
+                                return None
+                            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                            if parsed.tzinfo is None:
+                                parsed = parsed.replace(tzinfo=timezone.utc)
+                            return parsed.astimezone(timezone.utc)
+                        conn.execute(
+                            "INSERT INTO calendar_revisions "
+                            "(event_id, revision_id, event_time, available_at, source, event_json) "
+                            "SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+                            "SELECT 1 FROM calendar_revisions WHERE event_id=? AND revision_id=?)",
+                            (event["event_id"], event["revision_id"], _utc(event_time),
+                             _utc(event["available_at"]),
+                             str(event.get("source") or "mt5_calendar"),
+                             json.dumps(event, sort_keys=True), event["event_id"], event["revision_id"]),
+                        )
+                    conn.execute("COMMIT")
+                    after = int(conn.execute("SELECT COUNT(*) FROM calendar_revisions").fetchone()[0])
+                    return after - before
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+
+        return await loop.run_in_executor(_POOL, _job)
 
     async def dedupe_ohlcv(self) -> int:
         """Remove duplicate (symbol, timeframe, timestamp) rows; return removed count."""
@@ -207,16 +538,18 @@ class DataStore:
 
         def _job() -> int:
             assert self._conn is not None
-            before = self._conn.execute("SELECT COUNT(*) FROM ohlcv").fetchone()[0]
-            self._conn.execute(
-                "DELETE FROM ohlcv WHERE rowid IN ("
-                "SELECT rowid FROM ("
-                "  SELECT rowid, row_number() OVER "
-                "    (PARTITION BY symbol, timeframe, timestamp ORDER BY rowid) AS rn "
-                "  FROM ohlcv) WHERE rn > 1)"
-            )
-            after = self._conn.execute("SELECT COUNT(*) FROM ohlcv").fetchone()[0]
-            return before - after
+            with self._lock:
+                before = self._conn.execute("SELECT COUNT(*) FROM ohlcv").fetchone()[0]
+                self._conn.execute(
+                    "DELETE FROM ohlcv WHERE rowid IN ("
+                    "SELECT rowid FROM ("
+                    "  SELECT rowid, row_number() OVER "
+                    "    (PARTITION BY symbol, timeframe, timestamp, COALESCE(source_id, ''), "
+                    "     COALESCE(server, ''), COALESCE(raw_symbol, '') ORDER BY rowid) AS rn "
+                    "  FROM ohlcv) WHERE rn > 1)"
+                )
+                after = self._conn.execute("SELECT COUNT(*) FROM ohlcv").fetchone()[0]
+                return before - after
 
         return await loop.run_in_executor(_POOL, _job)
 
@@ -228,23 +561,31 @@ class DataStore:
 
         def _bulk() -> None:
             assert self._conn is not None
-            for item in items:
-                if isinstance(item, Tick):
-                    self._conn.execute(
-                        "INSERT INTO ticks (symbol, bid, ask, spread, timestamp) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (item.symbol, item.bid, item.ask, item.spread, item.timestamp),
-                    )
-                elif isinstance(item, OHLCV):
-                    self._conn.execute(
-                        "INSERT INTO ohlcv "
-                        "(symbol, timeframe, open, high, low, close, volume, timestamp) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            item.symbol, item.timeframe, item.open, item.high,
-                            item.low, item.close, item.volume, item.timestamp,
-                        ),
-                    )
+            with self._lock:
+                for item in items:
+                    if isinstance(item, Tick):
+                        self._conn.execute(
+                            "INSERT INTO ticks (symbol, bid, ask, spread, timestamp, source_id, provider, "
+                            "broker, server, logical_symbol, raw_symbol, contract_snapshot_id, time_msc, "
+                            "last, volume, volume_real, flags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (item.symbol, item.bid, item.ask, item.spread, item.timestamp, item.source_id,
+                             item.provider, item.broker, item.server, item.logical_symbol, item.raw_symbol,
+                             item.contract_snapshot_id, item.time_msc, item.last, item.volume,
+                             item.volume_real, item.flags),
+                        )
+                    elif isinstance(item, OHLCV):
+                        self._conn.execute(
+                            "INSERT INTO ohlcv "
+                            "(symbol, timeframe, open, high, low, close, volume, timestamp, source_id, provider, "
+                            "broker, server, logical_symbol, raw_symbol, contract_snapshot_id, real_volume) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                item.symbol, item.timeframe, item.open, item.high,
+                                item.low, item.close, item.volume, item.timestamp, item.source_id,
+                                item.provider, item.broker, item.server, item.logical_symbol,
+                                item.raw_symbol, item.contract_snapshot_id, item.real_volume,
+                            ),
+                        )
 
         await loop.run_in_executor(_POOL, _bulk)
 
@@ -300,9 +641,11 @@ class DataStore:
 
         where = " AND ".join(conditions)
         sql = (
-            f"SELECT symbol, timeframe, open, high, low, close, volume, timestamp "
+            f"SELECT symbol, timeframe, open, high, low, close, volume, timestamp, "
+            f"source_id, provider, broker, server, logical_symbol, raw_symbol, contract_snapshot_id, real_volume "
             f"FROM ohlcv WHERE {where} "
-            f"QUALIFY row_number() OVER (PARTITION BY timestamp ORDER BY rowid) = 1 "
+            f"QUALIFY row_number() OVER (PARTITION BY timestamp, COALESCE(source_id, ''), "
+            f"COALESCE(server, ''), COALESCE(raw_symbol, '') ORDER BY rowid) = 1 "
             f"ORDER BY timestamp DESC LIMIT ?"
         )
         params.append(limit)
@@ -312,7 +655,9 @@ class DataStore:
             OHLCV(
                 symbol=r[0], timeframe=r[1],
                 open=r[2], high=r[3], low=r[4], close=r[5],
-                volume=r[6], timestamp=r[7],
+                volume=r[6], timestamp=r[7], source_id=r[8], provider=r[9],
+                broker=r[10], server=r[11], logical_symbol=r[12], raw_symbol=r[13],
+                contract_snapshot_id=r[14], real_volume=r[15],
             )
             for r in rows
         ]
@@ -368,13 +713,17 @@ class DataStore:
         self, symbol: str, count: int = 50,
     ) -> list[Tick]:
         rows = await self._fetch(
-            "SELECT symbol, bid, ask, spread, timestamp "
+            "SELECT symbol, bid, ask, spread, timestamp, source_id, provider, broker, server, "
+            "logical_symbol, raw_symbol, contract_snapshot_id, time_msc, last, volume, volume_real, flags "
             "FROM ticks WHERE symbol = ? "
             "ORDER BY timestamp DESC LIMIT ?",
             (symbol, count),
         )
         return [
-            Tick(symbol=r[0], bid=r[1], ask=r[2], spread=r[3], timestamp=r[4])
+            Tick(symbol=r[0], bid=r[1], ask=r[2], spread=r[3], timestamp=r[4],
+                 source_id=r[5], provider=r[6], broker=r[7], server=r[8],
+                 logical_symbol=r[9], raw_symbol=r[10], contract_snapshot_id=r[11],
+                 time_msc=r[12], last=r[13], volume=r[14], volume_real=r[15], flags=r[16])
             for r in rows
         ]
 
@@ -503,7 +852,8 @@ class DataStore:
 
         def _exec() -> None:
             assert self._conn is not None
-            self._conn.execute(sql, params)
+            with self._lock:
+                self._conn.execute(sql, params)
 
         await loop.run_in_executor(_POOL, _exec)
 
@@ -514,6 +864,7 @@ class DataStore:
 
         def _query() -> list[tuple[Any, ...]]:
             assert self._conn is not None
-            return self._conn.execute(sql, params).fetchall()
+            with self._lock:
+                return self._conn.execute(sql, params).fetchall()
 
         return await loop.run_in_executor(_POOL, _query)

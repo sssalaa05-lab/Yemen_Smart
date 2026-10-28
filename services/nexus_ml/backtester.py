@@ -32,6 +32,10 @@ class BacktestResult:
     avg_win: float = 0.0
     avg_loss: float = 0.0
     expectancy: float = 0.0
+    gross_pnl: float = 0.0
+    net_pnl: float = 0.0
+    total_costs: float = 0.0
+    cost_assumptions: dict[str, float] = field(default_factory=dict)
     equity_curve: list[float] = field(default_factory=list)
     trade_log: list[dict[str, Any]] = field(default_factory=list)
 
@@ -49,6 +53,10 @@ class BacktestResult:
             "avg_win": round(self.avg_win, 6),
             "avg_loss": round(self.avg_loss, 6),
             "expectancy": round(self.expectancy, 6),
+            "gross_pnl": round(self.gross_pnl, 6),
+            "net_pnl": round(self.net_pnl, 6),
+            "total_costs": round(self.total_costs, 6),
+            "cost_assumptions": dict(self.cost_assumptions),
         }
 
 
@@ -71,6 +79,9 @@ class SimpleBacktester:
         risk_per_trade: float = 0.02,
         bars_per_year: int = 252 * 24,
         max_hold_bars: int = 60,
+        commission_per_round_trip: float = 0.0,
+        fees_per_round_trip: float = 0.0,
+        slippage_pips_per_side: float = 0.0,
     ) -> None:
         self.spread_pips = spread_pips
         self.pip_value = pip_value
@@ -78,6 +89,15 @@ class SimpleBacktester:
         self.risk_per_trade = risk_per_trade
         self.bars_per_year = bars_per_year
         self.max_hold_bars = max_hold_bars
+        self.commission_per_round_trip = max(0.0, float(commission_per_round_trip))
+        self.fees_per_round_trip = max(0.0, float(fees_per_round_trip))
+        self.slippage_pips_per_side = max(0.0, float(slippage_pips_per_side))
+
+    def _costs(self, size: float) -> tuple[float, float, float]:
+        spread = self.spread_pips * self.pip_value * size
+        slippage = 2.0 * self.slippage_pips_per_side * self.pip_value * size
+        fixed = self.commission_per_round_trip + self.fees_per_round_trip
+        return spread, slippage, fixed
 
     # ── Main entry ────────────────────────────────────────────────────────
 
@@ -122,8 +142,10 @@ class SimpleBacktester:
                 )
 
                 if should_exit:
-                    spread_cost = self.spread_pips * self.pip_value * position.size
-                    net_pnl = pnl_raw * position.size - spread_cost
+                    gross_pnl = pnl_raw * position.size
+                    spread_cost, slippage_cost, fixed_cost = self._costs(position.size)
+                    costs = spread_cost + slippage_cost + fixed_cost
+                    net_pnl = gross_pnl - costs
                     capital += net_pnl
 
                     trade_log.append({
@@ -133,7 +155,13 @@ class SimpleBacktester:
                         "entry_price": position.entry_price,
                         "exit_price": c,
                         "pnl_pips": pnl_pips,
+                        "gross_pnl": gross_pnl,
                         "pnl_usd": net_pnl,
+                        "spread_cost": spread_cost,
+                        "slippage_cost": slippage_cost,
+                        "commission_cost": self.commission_per_round_trip,
+                        "fees_cost": self.fees_per_round_trip,
+                        "total_costs": costs,
                         "bars_held": bars_held,
                     })
                     position = None
@@ -154,8 +182,10 @@ class SimpleBacktester:
         if position is not None:
             c = ohlcv[-1, 3]
             pnl_raw = (c - position.entry_price) * position.direction
-            spread_cost = self.spread_pips * self.pip_value * position.size
-            capital += pnl_raw * position.size - spread_cost
+            gross_pnl = pnl_raw * position.size
+            spread_cost, slippage_cost, fixed_cost = self._costs(position.size)
+            costs = spread_cost + slippage_cost + fixed_cost
+            capital += gross_pnl - costs
             trade_log.append({
                 "entry_idx": position.entry_idx,
                 "exit_idx": n - 1,
@@ -163,12 +193,29 @@ class SimpleBacktester:
                 "entry_price": position.entry_price,
                 "exit_price": c,
                 "pnl_pips": pnl_raw / self.pip_value,
-                "pnl_usd": pnl_raw * position.size - spread_cost,
+                "gross_pnl": gross_pnl,
+                "pnl_usd": gross_pnl - costs,
+                "spread_cost": spread_cost,
+                "slippage_cost": slippage_cost,
+                "commission_cost": self.commission_per_round_trip,
+                "fees_cost": self.fees_per_round_trip,
+                "total_costs": costs,
                 "bars_held": n - 1 - position.entry_idx,
             })
             equity_curve.append(capital)
 
-        return self._compute_metrics(equity_curve, trade_log)
+        result = self._compute_metrics(equity_curve, trade_log)
+        result.gross_pnl = float(sum(t.get("gross_pnl", 0.0) for t in trade_log))
+        result.net_pnl = float(sum(t.get("pnl_usd", 0.0) for t in trade_log))
+        result.total_costs = float(sum(t.get("total_costs", 0.0) for t in trade_log))
+        result.cost_assumptions = {
+            "spread_pips": float(self.spread_pips),
+            "pip_value": float(self.pip_value),
+            "commission_per_round_trip": self.commission_per_round_trip,
+            "fees_per_round_trip": self.fees_per_round_trip,
+            "slippage_pips_per_side": self.slippage_pips_per_side,
+        }
+        return result
 
     # ── Metrics calculation ───────────────────────────────────────────────
 

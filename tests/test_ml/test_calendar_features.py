@@ -35,12 +35,16 @@ def _ev(
     previous=None,
     name: str = "Test Event",
 ) -> dict:
+    event_dt = datetime.fromisoformat(time.replace("Z", "+00:00"))
+    available_at = event_dt if actual is not None else event_dt - timedelta(hours=2)
     return {
         "event_id": name,
         "name": name,
         "currency": currency,
         "importance": importance,
         "time": time,
+        "available_at": available_at.isoformat(),
+        "revision_id": f"{name}:v1",
         "actual": actual,
         "forecast": forecast,
         "previous": previous,
@@ -280,3 +284,34 @@ class TestEnrichment:
             ts_candidates=(None, "2026-10-27T12:15:00Z"),
         )
         assert feats["cal_min_to_next_high"] == pytest.approx(15.0)
+
+    def test_revision_without_available_at_is_excluded(self):
+        raw = _ev("2026-10-27T12:30:00Z")
+        raw.pop("available_at")
+        assert prepare_events([raw]) == []
+
+    def test_event_revision_is_not_visible_before_its_availability(self):
+        raw = _ev(
+            "2026-10-27T11:30:00Z", actual="1.2", forecast="1.0",
+            name="released-value",
+        )
+        raw["available_at"] = "2026-10-27T12:10:00Z"
+        events = prepare_events([raw])
+        before = compute_calendar_features(
+            "XAUUSD", datetime(2026, 10, 27, 12, 0, tzinfo=UTC), events,
+        )
+        after = compute_calendar_features(
+            "XAUUSD", datetime(2026, 10, 27, 12, 11, tzinfo=UTC), events,
+        )
+        assert before["cal_surprise_signed"] == 0.0
+        assert after["cal_surprise_signed"] != 0.0
+
+    def test_latest_available_revision_replaces_prior_vintage(self):
+        first = _ev("2026-10-27T13:00:00Z", name="same-event")
+        correction = dict(first)
+        first["available_at"] = "2026-10-27T10:00:00Z"
+        correction["available_at"] = "2026-10-27T11:30:00Z"
+        correction["revision_id"] = "same-event:v2"
+        events = prepare_events([first, correction])
+        features = compute_calendar_features("XAUUSD", self.ts, events)
+        assert features["cal_high_count_next24h"] == 1.0

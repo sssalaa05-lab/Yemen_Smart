@@ -40,6 +40,19 @@ class Tick(BaseModel):
     ask: float
     spread: float = 0.0
     timestamp: datetime = Field(default_factory=_utcnow)
+    # Source identity remains separate from the compatibility/logical symbol.
+    source_id: str | None = None
+    provider: str | None = None
+    broker: str | None = None
+    server: str | None = None
+    logical_symbol: str | None = None
+    raw_symbol: str | None = None
+    contract_snapshot_id: str | None = None
+    time_msc: int | None = None
+    last: float | None = None
+    volume: float | None = None
+    volume_real: float | None = None
+    flags: int | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -61,6 +74,14 @@ class OHLCV(BaseModel):
     close: float
     volume: float = 0.0
     timestamp: datetime = Field(default_factory=_utcnow)
+    source_id: str | None = None
+    provider: str | None = None
+    broker: str | None = None
+    server: str | None = None
+    logical_symbol: str | None = None
+    raw_symbol: str | None = None
+    contract_snapshot_id: str | None = None
+    real_volume: float | None = None
 
     @model_validator(mode="after")
     def validate_hloc(self) -> "OHLCV":
@@ -229,9 +250,11 @@ class PerformanceMetrics(BaseModel):
 
 class NewsItem(BaseModel):
     id: str = ""  # stable hash id — used by the dashboard as React key
+    revision_id: str = ""
     headline: str
     source: str = ""
     timestamp: datetime = Field(default_factory=_utcnow)
+    available_at: datetime | None = None  # first observed by this system; not provider publication time
     impact: str = "low"
     sentiment: str = "neutral"
     affected_currencies: list[str] = Field(default_factory=list)
@@ -239,6 +262,8 @@ class NewsItem(BaseModel):
 
 
 class CalendarEvent(BaseModel):
+    event_id: str = ""
+    revision_id: str = ""
     event_name: str
     currency: str
     impact: str = "low"
@@ -246,4 +271,5 @@ class CalendarEvent(BaseModel):
     previous: str | None = None
     actual: str | None = None
     timestamp: datetime = Field(default_factory=_utcnow)
+    available_at: datetime | None = None  # first observed by this system; not provider publication time
     source: str = "forexfactory"

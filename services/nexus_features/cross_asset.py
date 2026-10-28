@@ -197,17 +197,39 @@ def _compute_trend(prices: np.ndarray, window: int = 20) -> float:
     return float(np.clip(delta / scale, -1.0, 1.0))
 
 
+def _snapshot_available_at(snapshot: dict[str, Any] | None, decision_time: datetime) -> bool:
+    """Use retrieval time as a conservative bound; reject unknown/future snapshots."""
+    if not isinstance(snapshot, dict):
+        return False
+    raw = snapshot.get("available_at") or snapshot.get("fetched_at")
+    if not isinstance(raw, str) or not raw.strip():
+        return False
+    try:
+        available = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if available.tzinfo is None:
+        return False
+    return available.astimezone(timezone.utc) <= decision_time.astimezone(timezone.utc)
+
+
 # ── Main computation ─────────────────────────────────────────────────────────
 
 async def compute_cross_asset_features(
     symbol: str,
     redis_client,
     gold_closes: np.ndarray | None = None,
+    decision_time: datetime | None = None,
 ) -> dict[str, Any]:
     """Compute and cache cross-asset features for gold (or any symbol).
 
     Returns a feature dict ready to merge into the nexus:features:XAUUSD:* payload.
     """
+    decision = decision_time or datetime.now(timezone.utc)
+    if decision.tzinfo is None:
+        raise ValueError("decision_time must be timezone-aware")
+    decision = decision.astimezone(timezone.utc)
+
     # 1. Try Redis cache for DXY and US10Y
     dxy = await _fetch_from_redis("DXY", redis_client)
     us10y = await _fetch_from_redis("US10Y", redis_client)
@@ -235,6 +257,13 @@ async def compute_cross_asset_features(
                                    json.dumps(us10y), ex=_CROSS_ASSET_TTL)
         except Exception:
             pass
+
+    dxy_available = _snapshot_available_at(dxy, decision)
+    us10y_available = _snapshot_available_at(us10y, decision)
+    if not dxy_available:
+        dxy = {**_FALLBACK_VALUES["DXY"], "source": "unavailable_asof", "fetched_at": decision.isoformat()}
+    if not us10y_available:
+        us10y = {**_FALLBACK_VALUES["US10Y"], "source": "unavailable_asof", "fetched_at": decision.isoformat()}
 
     dxy_level = float(dxy.get("level", 104.0))
     dxy_change = float(dxy.get("change_5d", 0.0))
@@ -307,6 +336,9 @@ async def compute_cross_asset_features(
         # Source metadata
         "cross_asset_source":    dxy.get("source", "unknown"),
         "cross_asset_updated":   dxy.get("fetched_at", ""),
+        "cross_asset_available": int(dxy_available and us10y_available),
+        "us10y_source":          us10y.get("source", "unknown"),
+        "us10y_updated":         us10y.get("fetched_at", ""),
     }
 
     # Cache the summary for the dashboard

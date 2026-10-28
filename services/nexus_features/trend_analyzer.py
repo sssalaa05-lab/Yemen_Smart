@@ -35,6 +35,8 @@ class SwingPoint:
     price: float
     kind: Literal["HIGH", "LOW"]
     timestamp: str | None = None
+    confirmation_index: int | None = None
+    confirmed_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,8 @@ def find_swing_points(
                 price=float(h[i]),
                 kind="HIGH",
                 timestamp=ts_col[i] if ts_col is not None else None,
+                confirmation_index=i + order,
+                confirmed_at=ts_col[i + order] if ts_col is not None else None,
             ))
         if l[i] == np.min(l[i - order : i + order + 1]):
             lows.append(SwingPoint(
@@ -77,6 +81,8 @@ def find_swing_points(
                 price=float(l[i]),
                 kind="LOW",
                 timestamp=ts_col[i] if ts_col is not None else None,
+                confirmation_index=i + order,
+                confirmed_at=ts_col[i + order] if ts_col is not None else None,
             ))
 
     merged = sorted(highs + lows, key=lambda s: s.index)

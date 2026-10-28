@@ -8,6 +8,8 @@ maps events to affected currencies, and exposes helpers for the
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum, unique
@@ -56,6 +58,27 @@ def _classify_impact(event_name: str, raw_impact: str = "") -> str:
     if any(kw in name_lower for kw in IMPACT_KEYWORDS_MEDIUM):
         return Impact.MEDIUM
     return Impact.LOW
+
+
+def _stamp_calendar_revisions(
+    events: list[CalendarEvent], observed_at: datetime,
+    first_observed: dict[str, datetime] | None = None,
+) -> list[CalendarEvent]:
+    """Attach stable content IDs and first-observed time to parsed snapshots."""
+    first_observed = first_observed or {}
+    for event in events:
+        identity = "|".join((event.source.lower(), event.currency.upper(), event.event_name.strip().lower(), event.timestamp.isoformat()))
+        event.event_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+        content = {
+            "impact": event.impact,
+            "forecast": event.forecast,
+            "previous": event.previous,
+            "actual": event.actual,
+        }
+        revision_material = event.event_id + "|" + json.dumps(content, sort_keys=True, ensure_ascii=False)
+        event.revision_id = hashlib.sha256(revision_material.encode("utf-8")).hexdigest()[:24]
+        event.available_at = first_observed.get(event.revision_id) or observed_at
+    return events
 
 
 # ── Calendar parser ──────────────────────────────────────────────────────────
@@ -118,8 +141,15 @@ class CalendarParser:
             ff_events = await self._fetch_ff_html_fallback()
 
         events = _merge_events(ff_events, inv_events)
+        observed_at = datetime.now(timezone.utc)
 
         async with self._lock:
+            first_observed = {
+                event.revision_id: event.available_at
+                for event in self._events
+                if event.revision_id and event.available_at is not None
+            }
+            events = _stamp_calendar_revisions(events, observed_at, first_observed)
             self._events = events
             self._last_fetch = asyncio.get_event_loop().time()
 

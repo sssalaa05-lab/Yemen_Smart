@@ -38,7 +38,7 @@ log = structlog.get_logger("nexus_data")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 DUCKDB_PATH = os.getenv("DUCKDB_PATH", "./data/nexus.duckdb")
 
-MT5_LOGIN = int(os.getenv("MT5_LOGIN", "0"))
+MT5_LOGIN = int((os.getenv("MT5_LOGIN") or "0").strip() or "0")
 MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
 MT5_SERVER = os.getenv("MT5_SERVER", "")
 MT5_PATH = os.getenv("MT5_PATH", "")
@@ -674,7 +674,11 @@ async def _publish_bars(symbol: str, bars: list[OHLCV]) -> None:
             volume=last.volume,
         ),
     )
-    if len(bars) >= 50:
+    if bars and all(b.source_id for b in bars):
+        # Source-aware bridge ingestion already committed these bars before
+        # publishing; do not create a second physical copy here.
+        pass
+    elif len(bars) >= 50:
         # Seed-like publish (full window from yahoo seed or the MT5 bridge):
         # bulk insert + dedupe so REST/chart history is immediately rich.
         try:
@@ -1107,6 +1111,55 @@ async def bridge_ingest_ticks(request: Request, body: dict[str, Any]):
     internal feeds (tick cache + ticks stream + DuckDB)."""
     _bridge_ok(request)
     received = body.get("ticks") or []
+    batch_id = body.get("batch_id")
+    source = body.get("source")
+    if batch_id and isinstance(source, dict):
+        try:
+            chunk_result = await data_store.persist_tick_batch_chunk(
+                source=source,
+                contract_snapshot=body.get("contract_snapshot"),
+                batch_id=str(batch_id),
+                window_start_ms=int(body["window_start_ms"]),
+                window_end_ms=int(body["window_end_ms"]),
+                chunk_index=int(body["chunk_index"]),
+                chunk_count=int(body["chunk_count"]),
+                ticks=received,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(422, f"invalid tick batch metadata: {exc}") from exc
+        except Exception as exc:
+            await log.aexception("bridge_tick_batch_persist_failed")
+            raise HTTPException(500, "tick batch persistence failed; do not advance watermark") from exc
+
+        # Fan out only after the durable source-table transaction commits.
+        # Preserve source identity in Redis event metadata and avoid writing
+        # the same tick a second time through _on_tick().
+        for t in received:
+            try:
+                ts = datetime.fromisoformat(t["timestamp"])
+                tick = Tick(
+                    symbol=str(source["logical_symbol"]).upper(), bid=float(t["bid"]),
+                    ask=float(t["ask"]), timestamp=ts, source_id=str(source["source_id"]),
+                    provider=source.get("provider"), broker=source.get("broker"),
+                    server=source.get("server"), logical_symbol=source.get("logical_symbol"),
+                    raw_symbol=source.get("raw_symbol"),
+                    contract_snapshot_id=(body.get("contract_snapshot") or {}).get("snapshot_id"),
+                    time_msc=int(t["time_msc"]), last=float(t.get("last") or 0),
+                    volume=float(t.get("volume") or 0), volume_real=float(t.get("volume_real") or 0),
+                    flags=int(t.get("flags") or 0),
+                )
+                await asyncio.gather(
+                    tick_cache.cache_tick(tick),
+                    redis_client.publish_event(
+                        RedisStream.TICK_STREAM,
+                        TickEvent(source="mt5-bridge", symbol=tick.symbol, bid=tick.bid,
+                                  ask=tick.ask, spread=tick.spread),
+                    ),
+                )
+            except Exception:
+                await log.aexception("bridge_tick_batch_fanout_failed")
+        return chunk_result
+
     accepted = 0
     for t in received[-100:]:
         try:
@@ -1133,12 +1186,14 @@ async def bridge_ingest_bars(request: Request, body: dict[str, Any]):
     (Redis cache merge + OHLCV stream + DuckDB) — identical to internal feeds."""
     _bridge_ok(request)
     received = body.get("bars") or []
+    source = body.get("source")
+    contract_snapshot = body.get("contract_snapshot")
     by_symbol: dict[str, list[OHLCV]] = {}
     for b in received:
         try:
             ts = b.get("timestamp")
             bar = OHLCV(
-                symbol=str(b.get("symbol", "")).upper(),
+                symbol=str((source or {}).get("logical_symbol") or b.get("symbol") or body.get("symbol", "")).upper(),
                 timeframe=str(b.get("timeframe", "M5")),
                 open=float(b["open"]),
                 high=float(b["high"]),
@@ -1146,8 +1201,16 @@ async def bridge_ingest_bars(request: Request, body: dict[str, Any]):
                 close=float(b["close"]),
                 volume=float(b.get("volume") or 0.0),
                 timestamp=(
-                    datetime.fromisoformat(ts) if ts else datetime.now(timezone.utc)
+                    datetime.fromisoformat(ts or b.get("time")) if (ts or b.get("time")) else datetime.now(timezone.utc)
                 ),
+                source_id=(source or {}).get("source_id"),
+                provider=(source or {}).get("provider"),
+                broker=(source or {}).get("broker"),
+                server=(source or {}).get("server"),
+                logical_symbol=(source or {}).get("logical_symbol"),
+                raw_symbol=(source or {}).get("raw_symbol"),
+                contract_snapshot_id=(contract_snapshot or {}).get("snapshot_id"),
+                real_volume=float(b.get("real_volume") or 0),
             )
             by_symbol.setdefault(bar.symbol, []).append(bar)
         except Exception:
@@ -1155,6 +1218,19 @@ async def bridge_ingest_bars(request: Request, body: dict[str, Any]):
     accepted = 0
     for sym, bars in by_symbol.items():
         bars.sort(key=lambda x: x.timestamp)
+        if isinstance(source, dict):
+            try:
+                await data_store.persist_source_bars(
+                    source=source, contract_snapshot=contract_snapshot,
+                    bars=[{
+                        "timeframe": bar.timeframe, "timestamp": bar.timestamp.isoformat(),
+                        "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close,
+                        "volume": bar.volume, "real_volume": bar.real_volume,
+                    } for bar in bars],
+                )
+            except Exception as exc:
+                await log.aexception("bridge_source_bars_persist_failed")
+                raise HTTPException(500, "source bars persistence failed") from exc
         await _publish_bars(sym, bars)
         accepted += len(bars)
     if accepted:
@@ -1189,9 +1265,10 @@ async def bridge_ingest_calendar(request: Request, body: dict[str, Any]):
         return s
 
     cleaned: list[dict] = []
+    available_at = datetime.now(timezone.utc).isoformat()
     for e in received[:200]:
         try:
-            cleaned.append({
+            event = {
                 "event_id": str(e.get("event_id", ""))[:64],
                 "name": str(e.get("name", ""))[:160],
                 "country": str(e.get("country", ""))[:8],
@@ -1202,10 +1279,25 @@ async def bridge_ingest_calendar(request: Request, body: dict[str, Any]):
                 "previous": _clean_metric(e.get("previous")),
                 "actual": _clean_metric(e.get("actual")),
                 "impact": str(e.get("impact", ""))[:32],
-            })
+                "available_at": available_at,
+            }
+            import hashlib as _hashlib
+            if not event["event_id"]:
+                identity = f"{event['currency']}|{event['name']}|{event['time']}"
+                event["event_id"] = _hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+            revision_content = {k: v for k, v in event.items() if k != "available_at"}
+            revision_payload = _json.dumps(revision_content, sort_keys=True, separators=(",", ":"))
+            event["revision_id"] = _hashlib.sha256(revision_payload.encode("utf-8")).hexdigest()[:32]
+            event["source"] = "mt5_calendar"
+            cleaned.append(event)
         except Exception:
             continue
     if cleaned:
+        try:
+            await data_store.persist_calendar_revisions(cleaned)
+        except Exception as exc:
+            await log.aexception("calendar_revision_persist_failed")
+            raise HTTPException(500, "calendar revision history could not be persisted") from exc
         import json as _json
         await redis_client.r.set(
             "nexus:calendar:mt5", _json.dumps(cleaned), ex=86400

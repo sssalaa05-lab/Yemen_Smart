@@ -320,6 +320,14 @@ def _merge_news(
     existing: list[NewsItem], incoming: list[NewsItem], cap: int
 ) -> list[NewsItem]:
     """Rolling merge: dedupe by id, newest first, capped."""
+    first_observed = {
+        item.revision_id: item.available_at
+        for item in existing
+        if item.revision_id and item.available_at is not None
+    }
+    for item in incoming:
+        if item.revision_id in first_observed:
+            item.available_at = first_observed[item.revision_id]
     seen: set[str] = set()
     merged: list[NewsItem] = []
     for item in sorted(

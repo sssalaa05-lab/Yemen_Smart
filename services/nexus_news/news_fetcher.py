@@ -207,9 +207,12 @@ class NewsFetcher:
 
             items.append(
                 NewsItem(
+                    id=_headline_hash(headline),
+                    revision_id=_news_revision_id(article.get("source", {}).get("name", "NewsAPI"), headline, ts),
                     headline=headline,
                     source=article.get("source", {}).get("name", "NewsAPI"),
                     timestamp=ts,
+                    available_at=datetime.now(timezone.utc),
                     affected_currencies=_map_currencies(headline),
                 )
             )
@@ -261,9 +264,12 @@ class NewsFetcher:
 
             items.append(
                 NewsItem(
+                    id=_headline_hash(headline),
+                    revision_id=_news_revision_id(article.get("source", {}).get("name", "GNews"), headline, ts),
                     headline=headline,
                     source=article.get("source", {}).get("name", "GNews"),
                     timestamp=ts,
+                    available_at=datetime.now(timezone.utc),
                     affected_currencies=_map_currencies(headline),
                 )
             )
@@ -301,9 +307,11 @@ class NewsFetcher:
             items.append(
                 NewsItem(
                     id=_headline_hash(headline),
+                    revision_id=_news_revision_id(source["name"], headline, ts, label, score),
                     headline=headline,
                     source=source["name"],
                     timestamp=ts,
+                    available_at=datetime.now(timezone.utc),
                     impact=_rss_impact(headline),
                     sentiment=label,
                     affected_currencies=_map_currencies(headline),
@@ -367,6 +375,12 @@ class NewsFetcher:
 def _headline_hash(headline: str) -> str:
     normalised = headline.lower().strip()
     return hashlib.sha256(normalised.encode()).hexdigest()[:16]
+
+
+def _news_revision_id(source: str, headline: str, published_at: datetime, *derived: Any) -> str:
+    """Stable content revision key; availability is recorded separately."""
+    material = "|".join((source.strip().lower(), headline.strip(), published_at.isoformat(), *(str(x) for x in derived)))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
 
 
 def _map_currencies(text: str) -> list[str]:

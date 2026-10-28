@@ -82,7 +82,7 @@ class MT5Executor(BrokerAdapter):
         server: str | None = None,
         path: str | None = None,
     ) -> None:
-        self._login = login or int(os.getenv("MT5_LOGIN", "0"))
+        self._login = login or int((os.getenv("MT5_LOGIN") or "0").strip() or "0")
         self._password = password or os.getenv("MT5_PASSWORD", "")
         self._server = server or os.getenv("MT5_SERVER", "")
         self._path = path or os.getenv("MT5_PATH", "")

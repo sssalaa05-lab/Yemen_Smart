@@ -34,6 +34,8 @@ class OrderBlock:
     kind: Literal["BULLISH", "BEARISH"]
     index: int
     timestamp: str | None = None
+    confirmation_index: int | None = None
+    confirmed_at: str | None = None
 
 
 # ── Level clustering ─────────────────────────────────────────────────────────
@@ -234,6 +236,8 @@ def detect_order_blocks(
             kind="BULLISH" if bullish_move else "BEARISH",
             index=i - 1,
             timestamp=ts_col[i - 1] if ts_col is not None else None,
+            confirmation_index=i,
+            confirmed_at=ts_col[i] if ts_col is not None else None,
         ))
 
     return blocks

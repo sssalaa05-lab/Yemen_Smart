@@ -206,8 +206,16 @@ def prepare_events(events: Iterable[dict[str, Any]] | None) -> list[dict[str, An
         currency = str(ev.get("currency") or ev.get("country") or "").upper()
         if not currency:
             continue
+        available_at = _parse_iso(ev.get("available_at"))
+        # Fail closed: an event timestamp is not evidence that its forecast,
+        # actual, or revised values were already published at that time.
+        if available_at is None:
+            continue
         prepared.append({
             "dt": dt,
+            "available_at": available_at,
+            "revision_id": str(ev.get("revision_id") or ev.get("revision") or ""),
+            "event_id": str(ev.get("event_id") or ev.get("id") or ""),
             "currency": currency,
             "importance": str(ev.get("importance") or "low").lower(),
             "surprise": compute_surprise(ev),
@@ -260,7 +268,19 @@ def compute_calendar_features(
     surprise: float | None = None
     surprise_dt: datetime | None = None
 
-    for ev in prepared_events:
+    # If revisions coexist in an archival source, use only the latest version
+    # that was actually available by decision time. Counting every vintage
+    # would double-count events and could expose a later correction.
+    latest_by_event: dict[str, dict[str, Any]] = {}
+    for index, ev in enumerate(prepared_events):
+        if ev["available_at"] > ts:
+            continue
+        event_key = ev.get("event_id") or f"__row_{index}"
+        prior = latest_by_event.get(event_key)
+        if prior is None or ev["available_at"] > prior["available_at"]:
+            latest_by_event[event_key] = ev
+
+    for ev in latest_by_event.values():
         if ev["currency"] not in rel:
             continue
         delta_sec = (ev["dt"] - ts).total_seconds()
@@ -331,4 +351,17 @@ def enrich_features_with_calendar(
     ):
         return False
     features.update(compute_calendar_features(symbol, ts, prepared_events))
+    as_of = [ev for ev in (prepared_events or []) if ev["available_at"] <= ts]
+    revisions = sorted({
+        (str(ev.get("event_id") or ""), str(ev.get("revision_id") or ""), ev["available_at"].isoformat())
+        for ev in as_of
+    })
+    features["_calendar_provenance"] = {
+        "decision_time": ts.isoformat(),
+        "availability_policy": "available_at<=decision_time; latest_revision_per_event",
+        "event_revisions": [
+            {"event_id": event_id, "revision_id": revision_id, "available_at": available_at}
+            for event_id, revision_id, available_at in revisions
+        ],
+    }
     return True

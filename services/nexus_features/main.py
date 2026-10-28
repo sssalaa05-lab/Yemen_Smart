@@ -39,7 +39,7 @@ from shared.models import SystemHealth
 from .indicators import calculate_all
 from .key_levels import detect_order_blocks, detect_sr_levels, find_round_numbers
 from .multi_timeframe import aggregate_features, calculate_mtf_trend_alignment, get_htf_context
-from .session_tagger import get_current_session, tag_dataframe, tag_session
+from .session_tagger import get_current_session, is_overlap, tag_dataframe, tag_session
 from .trend_analyzer import calculate_trend_score, detect_market_structure, detect_trend
 from .volatility import (
     calculate_atr_normalized,
@@ -62,6 +62,38 @@ CONSUMER_NAME = f"features-worker-{os.getpid()}"
 from shared import setup_logger as _setup_logger
 _setup_logger("nexus-features", level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("nexus.features")
+
+_TIMEFRAME_SECONDS = {
+    "M1": 60, "M2": 120, "M3": 180, "M4": 240, "M5": 300,
+    "M6": 360, "M10": 600, "M12": 720, "M15": 900, "M20": 1200,
+    "M30": 1800, "H1": 3600, "H2": 7200, "H3": 10800,
+    "H4": 14400, "H6": 21600, "H8": 28800, "H12": 43200,
+    "D1": 86400, "W1": 604800,
+}
+
+
+def _closed_ohlcv_frame(
+    df: pd.DataFrame, timeframe: str, as_of: datetime | None = None,
+) -> pd.DataFrame:
+    """Return chronologically ordered bars whose full interval ended by as_of.
+
+    MT5 bar timestamps are open times. Missing/ambiguous market timestamps fail
+    closed-bar qualification instead of being assigned processing time.
+    """
+    seconds = _TIMEFRAME_SECONDS.get(str(timeframe).upper())
+    if seconds is None or "timestamp" not in df.columns:
+        return df.iloc[0:0].copy()
+    decision = pd.Timestamp(as_of or datetime.now(timezone.utc))
+    if decision.tzinfo is None:
+        raise ValueError("as_of must be timezone-aware")
+    decision = decision.tz_convert("UTC")
+    out = df.copy()
+    out["timestamp"] = pd.to_datetime(out["timestamp"], utc=True, errors="coerce")
+    out.dropna(subset=["timestamp"], inplace=True)
+    out.sort_values("timestamp", inplace=True)
+    out.drop_duplicates(subset=["timestamp"], keep="last", inplace=True)
+    out = out.loc[out["timestamp"] + pd.to_timedelta(seconds, unit="s") <= decision]
+    return out.reset_index(drop=True)
 
 # ── Globals ──────────────────────────────────────────────────────────────────
 
@@ -190,6 +222,10 @@ async def calculate_features(req: CalculateRequest):
     if df.empty or not {"open", "high", "low", "close"}.issubset(df.columns):
         raise HTTPException(400, "OHLCV data must contain open/high/low/close columns")
 
+    df = _closed_ohlcv_frame(df, req.timeframe)
+    if df.empty:
+        raise HTTPException(400, "No timestamped, fully closed OHLCV bars available")
+
     df = calculate_all(df)
     df = tag_dataframe(df)
 
@@ -216,7 +252,12 @@ async def calculate_features(req: CalculateRequest):
             "strength": trend.strength,
             "score": score,
             "structure": [
-                {"label": s.label, "price": s.swing.price, "index": s.swing.index}
+                {
+                    "label": s.label, "price": s.swing.price,
+                    "index": s.swing.index,
+                    "confirmation_index": s.swing.confirmation_index,
+                    "confirmed_at": s.swing.confirmed_at,
+                }
                 for s in structure[-10:]
             ],
         }
@@ -232,7 +273,12 @@ async def calculate_features(req: CalculateRequest):
             ],
             "round_numbers": [{"price": l.price, "kind": l.kind} for l in rounds],
             "order_blocks": [
-                {"high": ob.high, "low": ob.low, "kind": ob.kind, "index": ob.index}
+                {
+                    "high": ob.high, "low": ob.low, "kind": ob.kind,
+                    "index": ob.index,
+                    "confirmation_index": ob.confirmation_index,
+                    "confirmed_at": ob.confirmed_at,
+                }
                 for ob in obs[-10:]
             ],
         }
@@ -342,14 +388,22 @@ async def _process_ohlcv_message(r: aioredis.Redis, data: dict[str, str]) -> Non
         df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
 
     df.dropna(subset=["open", "high", "low", "close"], inplace=True)
+    df = _closed_ohlcv_frame(df, timeframe)
     if len(df) < 50:
-        logger.warning("features.too_few_valid_bars %s/%s rows=%d", symbol, timeframe, len(df))
+        logger.warning("features.too_few_closed_bars %s/%s rows=%d", symbol, timeframe, len(df))
         return
 
     df = calculate_all(df)
     df = tag_dataframe(df)
 
     features = _extract_features(df)
+    # Carry the market-bar timestamp separately from event/processing time.
+    bar_timestamp = None
+    if "timestamp" in df.columns:
+        parsed_bar_ts = pd.to_datetime(df.iloc[-1]["timestamp"], utc=True, errors="coerce")
+        if not pd.isna(parsed_bar_ts):
+            bar_timestamp = parsed_bar_ts.to_pydatetime()
+            features["bar_timestamp"] = bar_timestamp.isoformat()
 
     trend = detect_trend(df)
     features["trend_direction"] = trend.direction.value
@@ -361,9 +415,9 @@ async def _process_ohlcv_message(r: aioredis.Redis, data: dict[str, str]) -> Non
     features["atr_normalized"] = _safe_float(atr_n.iloc[-1])
     features["vol_regime"] = str(regime.iloc[-1])
 
-    session_info = get_current_session()
-    features["session"] = session_info.name
-    features["session_overlap"] = session_info.is_overlap
+    feature_time = bar_timestamp or datetime.now(timezone.utc)
+    features["session"] = tag_session(feature_time)
+    features["session_overlap"] = is_overlap(feature_time)
 
     features["close"] = _safe_float(df["close"].iloc[-1])
     features["atr_14"] = _safe_float(df["atr"].iloc[-1]) if "atr" in df.columns else 0.0
@@ -380,7 +434,9 @@ async def _process_ohlcv_message(r: aioredis.Redis, data: dict[str, str]) -> Non
     if profile.cross_asset_correlators:
         try:
             closes = df["close"].values[-30:] if len(df) >= 30 else df["close"].values
-            ca_feats = await compute_cross_asset_features(symbol, r, gold_closes=closes)
+            ca_feats = await compute_cross_asset_features(
+                symbol, r, gold_closes=closes, decision_time=bar_timestamp,
+            )
             features.update(ca_feats)
         except Exception:
             logger.debug("cross_asset features failed for %s", symbol, exc_info=True)
@@ -398,6 +454,7 @@ async def _process_ohlcv_message(r: aioredis.Redis, data: dict[str, str]) -> Non
         source=SERVICE_NAME,
         symbol=symbol,
         timeframe=timeframe,
+        timestamp=bar_timestamp or datetime.now(timezone.utc),
         features={k: v for k, v in features.items() if isinstance(v, (int, float, str))},
     )
     await r.xadd(

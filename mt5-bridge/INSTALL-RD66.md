@@ -130,62 +130,40 @@ python bridge.py
 ```
 20:30:01 | INFO    | [ZYSB] | ═══ ZYSB — Yemen Smart Bridge v3.0 ═══
 20:30:01 | INFO    | [ZYSB] | ✅ متصل: حساب 12345 | broker-Demo | DEMO ✅
-20:30:01 | INFO    | [ZYSB] | 🕒 فارق التوقيت المقاس من أحدث tick: +2 ساعة
+20:30:01 | INFO    | [ZYSB] | MT5 Python epoch timestamps are treated as UTC (no broker offset applied)
 20:30:01 | INFO    | [ZYSB] | 📌 XAUUSD → XAUUSD (digits=2, point=0.01)
 20:30:01 | INFO    | [ZYSB] | 🌱 بذر 1500 شمعة لـ XAUUSD
 20:30:01 | INFO    | [ZYSB] | 🚀 بدء الحلقة الرئيسية
 ```
 
-> 💡 لو ثبّت `ZYSBTimeEA`، سيستخدم ZYSB قياسه الدقيق بدلًا من القياس التقريبي من tick.
+> ملاحظة: `ZYSBTimeEA` أداة تشخيص لساعة السيرفر فقط؛ جسر Python لا يستخدم إزاحة منها لتحويل epoch، لأن طوابع MT5 Python تُعامل كـUTC.
 
 ---
 
 ## اختياري: تخصيص المسار في `.env`
 
-لو أردت تحديد مسار مختلف لملف `zysb_server_time.json` (مثلاً لو لديك تثبيت MT5 آخر):
+الملف `zysb_server_time.json` لا يلزم لجسر Python لتحويل timestamps. يمكن تحديد مساره فقط لأغراض تشخيصية؛ لا تضف `BRIDGE_SERVER_TIME_FILE` أو `BRIDGE_SERVER_TZ_OFFSET` لتحريك أوقات السوق.
 
 ```env
 # في C:\B_Yemen_Smart\.env
-BRIDGE_SERVER_TIME_FILE=C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\Common\Files\zysb_server_time.json
 BRIDGE_CALENDAR_FILE=C:\Users\rd66\AppData\Roaming\MetaQuotes\Terminal\Common\Files\zysb_calendar.json
 ```
 
-افتراضيًا، ZYSB يبحث تلقائيًا في:
-1. المجلد الحالي (`C:\B_Yemen_Smart\`)
-2. `%APPDATA%\MetaQuotes\Terminal\Common\Files\`
-
-لذا **لا تحتاج لتعديل شيء** في الإعداد الافتراضي.
+البيانات التاريخية الخام لا تُحوّل بإزاحة ساعة حالية. احتفظ بأي وقت سيرفر خام منفصلًا مع سياسة تحويل موثقة ومؤرخة إذا احتجت ذلك.
 
 ---
 
 ## حل المشاكل
 
-### المشكلة: الـ EA لا يكتب الملف
+### تشخيص فرق وقت السيرفر (اختياري)
 
-**الأعراض:** `dir` يُظهر أن `zysb_server_time.json` غير موجود
+ملف EA اختياري؛ عدم وجوده لا يمنع جسر Python من إرسال أوقات rates/ticks بصيغة UTC.
 
-**الحلول:**
-1. تأكد أنك نسخت الـ EA إلى `MQL5\Experts\` وليس مجلد آخر
-2. في MT5: **Tools → Options → Expert Advisors** → فعّل ✅ "Allow Algorithmic Trading"
-3. تأكد أن الـ EA مُثبّت على شارت مفتوح (تراه في تبويب **Experts** بأيقونة وجه مبتسم 😊)
-4. راجع تبويب **Experts** لأي أخطاء
+إذا كنت تستخدم EA للتشخيص فقط، تحقق من تثبيته في `MQL5\Experts\` ومن رسائله في تبويب **Experts**. لا تعتمد على فرق الساعة الحالي لتعديل التاريخ السابق.
 
-### المشكلة: ZYSB لا يجد الملف
+### ملاحظة حول إعدادات offset القديمة
 
-**الأعراض:** `bridge.py` يطبع `🕒 فارق التوقيت المقاس من أحدث tick` بدلًا من القراءة من الملف
-
-**السبب:** الـ EA لم يكتب الملف بعد، أو المسار غير صحيح
-
-**الحل:**
-1. شغّل `ZYSBTimeEA` لمدة 30 ثانية على الأقل
-2. تحقق من المسار يدويًا:
-   ```cmd
-   dir "%APPDATA%\MetaQuotes\Terminal\Common\Files\zysb_server_time.json"
-   ```
-3. لو الملف في مسار مختلف، حدده في `.env`:
-   ```env
-   BRIDGE_SERVER_TIME_FILE=C:\path\to\zysb_server_time.json
-   ```
+الإصدارات السابقة استخدمت `BRIDGE_SERVER_TZ_OFFSET` و`BRIDGE_SERVER_TIME_FILE` لتحويل الأوقات. الإصدارات الحالية لا تطبق إزاحة على epoch الخاص بواجهة MT5 Python؛ احذف إعداد offset القديم بعد تحديث الجسر، ولا تعاود إضافته لعلاج اختلاف التوقيت.
 
 ### المشكلة: رسالة "الرمز XAUUSD غير موجود"
 

@@ -40,6 +40,7 @@ except ImportError:
     FeatureImportanceModel = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
+from .training_data import training_schema_is_safe
 _AGGRESSIVE_TRADING = os.getenv("NEXUS_AGGRESSIVE_TRADING", "false").lower() == "true"
 
 DEFAULT_WEIGHTS: dict[str, float] = {
@@ -130,13 +131,43 @@ class ModelEnsemble:
 
     def load_all_models(self) -> dict[str, bool]:
         """Attempt to load every model; return a status map."""
+        schema_path = self.model_dir / "training_schema.json"
+        try:
+            schema = json.loads(schema_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            schema = None
+        if not training_schema_is_safe(schema):
+            logger.error(
+                "Refusing to load legacy/unverified models from %s; "
+                "retrain with leakage-safe schema v2 first",
+                self.model_dir,
+            )
+            self.feature_names = []
+            status = {
+                "xgboost": False,
+                "lgbm_regime": False,
+                "lstm": False,
+                "anomaly": False,
+                "rf_importance": False,
+                "sentiment": True,
+            }
+            self._models_loaded = True
+            return status
+
         names_path = self.model_dir / "feature_names.json"
         try:
-            if names_path.exists():
-                self.feature_names = json.loads(names_path.read_text())
-                logger.info("Loaded %d training feature names from %s", len(self.feature_names), names_path)
+            self.feature_names = json.loads(names_path.read_text())
+            if self.feature_names != schema["feature_names"]:
+                raise ValueError("feature_names.json does not match training_schema.json")
+            logger.info("Loaded %d training feature names from %s", len(self.feature_names), names_path)
         except Exception:
-            logger.warning("Could not load feature_names.json — falling back to raw dict order", exc_info=True)
+            logger.error("Refusing model load: feature schema is absent or inconsistent", exc_info=True)
+            self.feature_names = []
+            self._models_loaded = True
+            return {
+                "xgboost": False, "lgbm_regime": False, "lstm": False,
+                "anomaly": False, "rf_importance": False, "sentiment": True,
+            }
 
         status: dict[str, bool] = {}
         loaders = {
@@ -148,6 +179,9 @@ class ModelEnsemble:
         }
 
         for name, (model, path) in loaders.items():
+            if name not in schema["trained_models"]:
+                status[name] = False
+                continue
             try:
                 model.load(path)
                 status[name] = True

@@ -32,7 +32,6 @@
 ║   BRIDGE_SEED_BARS            (اختياري) 1500                            ║
 ║   BRIDGE_SKIP_SEED            (اختياري) true — تخطي البذر لتفادي 429   ║
 ║   BRIDGE_REQUEST_DELAY_SEC    (اختياري) 2.0 — تأخير بين الطلبات        ║
-║   BRIDGE_SERVER_TZ_OFFSET     (اختياري) auto                            ║
 ║   BRIDGE_LOG_LEVEL            (اختياري) INFO                             ║
 ║                                                                          ║
 ║   مثال CMD على ويندوز:                                                   ║
@@ -54,11 +53,14 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Any
+import hashlib
 
 import requests
+from time_utils import closed_rates, epoch_seconds_to_utc_iso, last_closed_rate
+from tick_recovery import WatermarkStore, chunked, plan_query_window, tick_fingerprint, tick_utc_iso
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  قراءة .env تلقائيًا (إن وُجد python-dotenv)
@@ -169,16 +171,16 @@ DECISION_POLL_SEC = _get_env_float("BRIDGE_DECISION_POLL_SEC", 120.0)
 CALENDAR_POLL_SEC = _get_env_float("BRIDGE_CALENDAR_POLL_SEC", 300.0)
 SEED_BARS = _get_env_int("BRIDGE_SEED_BARS", 1500)
 POSITIONS_POLL_SEC = _get_env_float("BRIDGE_POSITIONS_POLL_SEC", 30.0)
+TICK_INITIAL_LOOKBACK_MS = _get_env_int("BRIDGE_TICK_INITIAL_LOOKBACK_MS", 300000)
+TICK_QUERY_WINDOW_MS = _get_env_int("BRIDGE_TICK_QUERY_WINDOW_MS", 300000)
+TICK_OVERLAP_MS = _get_env_int("BRIDGE_TICK_OVERLAP_MS", 2000)
+TICK_BATCH_CHUNK_SIZE = _get_env_int("BRIDGE_TICK_BATCH_CHUNK_SIZE", 200)
+WATERMARK_FILE = _get_env("BRIDGE_WATERMARK_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "tick_watermarks.json"))
+WATERMARKS = WatermarkStore(WATERMARK_FILE)
 
 # ضبط 429 Too Many Requests (بوابة Z.ai تفرض حدودًا صارمة ~30-60 req/min)
 SKIP_SEED = _get_env_bool("BRIDGE_SKIP_SEED", True)  # default true for Z.ai preview
 REQUEST_DELAY_SEC = _get_env_float("BRIDGE_REQUEST_DELAY_SEC", 2.0)
-
-# التوقيت
-SERVER_TZ_OFFSET: Any = _get_env("BRIDGE_SERVER_TZ_OFFSET", "auto")
-DEFAULT_TZ_OFFSET_HOURS = 2.0
-SERVER_TIME_FILE = _get_env("BRIDGE_SERVER_TIME_FILE", "zysb_server_time.json")
-TZ_RECHECK_SEC = 1800.0
 
 # التنفيذ
 EXECUTE = _get_env_bool("BRIDGE_EXECUTE", False)
@@ -229,7 +231,7 @@ if EXECUTE:
 print(f"  POLL: tick={POLL_TICKS_SEC}s  bar={POLL_BARS_SEC}s  hb={HEARTBEAT_SEC}s  "
       f"decision={DECISION_POLL_SEC}s  calendar={CALENDAR_POLL_SEC}s  positions={POSITIONS_POLL_SEC}s")
 print(f"  429: skip_seed={SKIP_SEED}  request_delay={REQUEST_DELAY_SEC}s")
-print(f"  TZ_OFFSET          = {SERVER_TZ_OFFSET}")
+print("  MT5 Python epoch timestamps are treated as UTC (no broker offset applied)")
 if not _HAS_DOTENV:
     print("  ⚠️  python-dotenv غير مثبت — استخدم 'pip install python-dotenv' لقراءة .env تلقائيًا")
 print("═" * 72)
@@ -244,7 +246,6 @@ SESSION.headers.update({
 })
 
 _state: dict[str, Any] = {
-    "tz_offset_hours": DEFAULT_TZ_OFFSET_HOURS,
     "last_bar_ts": {},
     "seeded": set(),
     "last_tick": {},
@@ -342,59 +343,12 @@ def _get(path: str, retries: int | None = None) -> dict | None:
 # ════════════════════════════════════════════════════════════════════════════
 
 def _server_to_utc(epoch_seconds: int) -> str:
-    """تحويل توقيت سيرفر الوسيط إلى UTC ISO."""
-    dt = datetime.fromtimestamp(epoch_seconds, tz=timezone.utc) - timedelta(
-        hours=_state.get("tz_offset_hours", DEFAULT_TZ_OFFSET_HOURS)
-    )
-    return dt.isoformat()
+    """حوّل epoch الخاص بواجهة MT5 Python إلى UTC ISO دون إزاحة وسيط.
 
-
-def _read_ea_offset_hours() -> float | None:
-    """الفارق الدقيق من ZYSBTimeEA."""
-    try:
-        paths = [os.path.abspath(SERVER_TIME_FILE)]
-        appdata = os.environ.get("APPDATA", "")
-        if appdata:
-            paths.append(os.path.join(
-                appdata, "MetaQuotes", "Terminal", "Common", "Files", SERVER_TIME_FILE))
-        for p in paths:
-            if os.path.exists(p):
-                with open(p, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    return float(data.get("offset_hours", 0))
-    except Exception:
-        pass
-    return None
-
-
-def resolve_tz_offset() -> float:
-    """قياس/قراءة فارق توقيت السيرفر عن UTC."""
-    if os.path.exists(SERVER_TIME_FILE):
-        ea_off = _read_ea_offset_hours()
-        if ea_off is not None:
-            _state["tz_offset_hours"] = ea_off
-            return ea_off
-
-    if SERVER_TZ_OFFSET != "auto":
-        try:
-            val = float(SERVER_TZ_OFFSET)
-            _state["tz_offset_hours"] = val
-            return val
-        except ValueError:
-            pass
-
-    # قياس تلقائي من أحدث tick
-    for logical, broker in SYMBOL_MAP.items():
-        info = mt5.symbol_info_tick(broker)
-        if info and info.time:
-            server_time = datetime.fromtimestamp(info.time, tz=timezone.utc)
-            utc_now = datetime.now(timezone.utc)
-            offset = round((server_time - utc_now).total_seconds() / 3600)
-            _state["tz_offset_hours"] = float(offset)
-            log.info("🕒 فارق التوقيت المقاس من أحدث tick (%s): +%s ساعة", logical, offset)
-            return float(offset)
-
-    return DEFAULT_TZ_OFFSET_HOURS
+    أوقات rates/ticks في واجهة Python موثقة UTC؛ وقت السيرفر الخام، إن توفر
+    من مصدر آخر، يجب أن يبقى حقلًا منفصلًا وألا يمر عبر هذه الدالة.
+    """
+    return epoch_seconds_to_utc_iso(epoch_seconds)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -485,13 +439,97 @@ def read_tick(logical: str, broker: str) -> dict | None:
     }
 
 
+def _contract_identity(logical: str, broker: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Stable feed identity and observed contract specification snapshot."""
+    account = mt5.account_info()
+    info = mt5.symbol_info(broker)
+    server = str(getattr(account, "server", "") or "unknown")
+    broker_name = str(getattr(account, "company", "") or "unknown")
+    # Keep feed identity independent from the canonical/logical alias. If an
+    # alias is remapped later, the provider/broker/server/raw-symbol identity
+    # remains stable and the original contract lineage is still addressable.
+    source_seed = f"MetaTrader5|{broker_name}|{server}|{broker}"
+    source_id = hashlib.sha256(source_seed.encode("utf-8")).hexdigest()[:32]
+    source = {"source_id": source_id, "provider": "MetaTrader5", "broker": broker_name,
+              "server": server, "logical_symbol": logical.upper(), "raw_symbol": broker}
+    spec_fields = ("digits", "point", "trade_contract_size", "volume_min", "volume_max",
+                   "volume_step", "currency_base", "currency_profit", "currency_margin",
+                   "trade_tick_size", "trade_tick_value", "trade_tick_value_profit",
+                   "trade_tick_value_loss", "trade_mode", "trade_calc_mode")
+    specs = {name: getattr(info, name, None) for name in spec_fields} if info else {}
+    specs = {k: v for k, v in specs.items() if v is None or isinstance(v, (str, int, float, bool))}
+    contract_key = f"{source_id}|{broker}"
+    prior = WATERMARKS.get_contract(contract_key)
+    if prior and prior.get("specs") == specs:
+        snapshot = prior
+    else:
+        observed_at = datetime.now(timezone.utc).isoformat()
+        snapshot_id = hashlib.sha256(
+            f"{source_id}|{broker}|{observed_at}|{json.dumps(specs, sort_keys=True)}".encode("utf-8")
+        ).hexdigest()[:32]
+        snapshot = {"snapshot_id": snapshot_id, "observed_at": observed_at, "specs": specs}
+        WATERMARKS.set_contract(contract_key, snapshot)
+    return source, snapshot
+
+
+def send_tick_batch(logical: str, broker: str) -> bool:
+    """Fetch range ticks with overlap; move local watermark only after full ack."""
+    source, contract = _contract_identity(logical, broker)
+    key = f"{source['source_id']}|{broker}"
+    now_ms = int(time.time() * 1000)
+    start_ms, end_ms = plan_query_window(
+        WATERMARKS.get_watermark(key), now_ms,
+        initial_lookback_ms=TICK_INITIAL_LOOKBACK_MS,
+        window_ms=TICK_QUERY_WINDOW_MS,
+        overlap_ms=TICK_OVERLAP_MS,
+    )
+    start_dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
+    end_dt = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc)
+    raw = mt5.copy_ticks_range(broker, start_dt, end_dt, mt5.COPY_TICKS_ALL)
+    if raw is None:
+        log.warning("copy_ticks_range فشل لـ %s (%s) — watermark محفوظ", broker, mt5.last_error())
+        return False
+    normalized: list[dict[str, Any]] = []
+    for record in raw:
+        names = getattr(getattr(record, "dtype", None), "names", None) or ()
+        item = {name: (record[name].item() if hasattr(record[name], "item") else record[name]) for name in names}
+        time_msc = int(item.get("time_msc") or int(item.get("time", 0)) * 1000)
+        if time_msc <= 0:
+            continue
+        tick = {"time_msc": time_msc, "timestamp": tick_utc_iso(time_msc),
+                "bid": float(item.get("bid") or 0), "ask": float(item.get("ask") or 0),
+                "last": float(item.get("last") or 0), "volume": int(item.get("volume") or 0),
+                "volume_real": float(item.get("volume_real") or 0), "flags": int(item.get("flags") or 0)}
+        tick["fingerprint"] = tick_fingerprint(tick)
+        normalized.append(tick)
+    normalized.sort(key=lambda row: (row["time_msc"], row["fingerprint"]))
+    parts = chunked(normalized, TICK_BATCH_CHUNK_SIZE)
+    batch_id = hashlib.sha256(f"{source['source_id']}|{broker}|{start_ms}|{end_ms}".encode()).hexdigest()[:32]
+    ack = None
+    for index, part in enumerate(parts):
+        ack = _post("/api/v2/bridge/ticks", {
+            "source": source, "contract_snapshot": contract, "batch_id": batch_id,
+            "window_start_ms": start_ms, "window_end_ms": end_ms,
+            "chunk_index": index, "chunk_count": len(parts), "ticks": part,
+        })
+        if not ack:
+            log.warning("تعذر إقرار chunk %d/%d؛ watermark محفوظ", index + 1, len(parts))
+            return False
+    if not ack or not ack.get("window_complete"):
+        log.warning("لم يكتمل إقرار جميع chunks لـ %s؛ watermark محفوظ", broker)
+        return False
+    WATERMARKS.commit_watermark(key, end_ms)
+    log.info("ticks range %s: %d ticks, %d chunks", logical, len(normalized), len(parts))
+    return True
+
+
 def read_bar(logical: str, broker: str, timeframe=mt5.TIMEFRAME_M5) -> dict | None:
-    """قراءة شمعة M5 — يستخدم b["time"] (متوافق مع numpy 2.x)."""
+    """قراءة أحدث شمعة M5 مغلقة؛ يُستبعد bar 0 الجاري."""
     bars = mt5.copy_rates_from_pos(broker, timeframe, 0, 2)
-    if bars is None or len(bars) < 1:
+    last = last_closed_rate(bars)
+    if last is None:
         return None
 
-    last = bars[-1]
     last_time = int(last["time"])
     if _state["last_bar_ts"].get(logical) == last_time:
         return None
@@ -501,7 +539,7 @@ def read_bar(logical: str, broker: str, timeframe=mt5.TIMEFRAME_M5) -> dict | No
         "symbol": logical,
         "timeframe": "M5",
         "bars": [{
-            "time": _server_to_utc(last_time),
+        "timestamp": _server_to_utc(last_time),
             "open": float(last["open"]),
             "high": float(last["high"]),
             "low": float(last["low"]),
@@ -517,11 +555,12 @@ def seed_history(logical: str, broker: str) -> None:
     if logical in _state["seeded"]:
         return
     bars = mt5.copy_rates_from_pos(broker, mt5.TIMEFRAME_M5, 0, SEED_BARS)
-    if bars is None or len(bars) == 0:
+    closed = closed_rates(bars)
+    if len(closed) == 0:
         return
 
     payload_bars = []
-    for b in bars:
+    for b in closed:
         payload_bars.append({
             "time": _server_to_utc(int(b["time"])),
             "open": float(b["open"]),
@@ -532,15 +571,18 @@ def seed_history(logical: str, broker: str) -> None:
             "real_volume": int(b["real_volume"]) if "real_volume" in b.dtype.names else 0,
         })
 
+    source, contract = _contract_identity(logical, broker)
     resp = _post("/api/v2/bridge/bars", {
         "symbol": logical,
         "timeframe": "M5",
+        "source": source,
+        "contract_snapshot": contract,
         "bars": payload_bars,
     })
     if resp:
         log.info("🌱 بذر %d شمعة لـ %s", len(payload_bars), logical)
         _state["seeded"].add(logical)
-        _state["last_bar_ts"][logical] = int(bars[-1]["time"])
+        _state["last_bar_ts"][logical] = int(closed[-1]["time"])
 
 
 def read_positions() -> list[dict]:
@@ -599,7 +641,6 @@ def send_heartbeat() -> bool:
         },
         "symbols": list(SYMBOL_MAP.keys()),
         "mode": "data-only" if not EXECUTE else "execute",
-        "tz_offset_hours": _state.get("tz_offset_hours"),
         "broker_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
     }
     resp = _post("/api/v2/bridge/heartbeat", payload)
@@ -623,7 +664,8 @@ def send_bar_if_new(logical: str, broker: str) -> bool:
     bar = read_bar(logical, broker)
     if not bar:
         return False
-    resp = _post("/api/v2/bridge/bars", bar)
+    source, contract = _contract_identity(logical, broker)
+    resp = _post("/api/v2/bridge/bars", {**bar, "source": source, "contract_snapshot": contract})
     if resp:
         log.info("📊 شمعة جديدة %s: close=%.2f vol=%d",
                  logical, bar["bars"][0]["close"], bar["bars"][0]["volume"])
@@ -783,8 +825,6 @@ def main_loop():
     if not init_mt5():
         sys.exit(1)
 
-    resolve_tz_offset()
-
     # بذر التاريخ (اختياري — معطّل افتراضيًا لبوابة Z.ai لتفادي 429)
     if not SKIP_SEED:
         for logical, broker in SYMBOL_MAP.items():
@@ -806,8 +846,6 @@ def main_loop():
     last_decision = 0.0
     last_calendar = 0.0
     last_positions = time.time()
-    last_tz_recheck = time.time()
-
     log.info("🚀 بدء الحلقة الرئيسية (single-threaded)")
 
     try:
@@ -823,7 +861,7 @@ def main_loop():
             # 1) tick — كل POLL_TICKS_SEC
             for logical, broker in SYMBOL_MAP.items():
                 try:
-                    send_tick(logical, broker)
+                    send_tick_batch(logical, broker)
                     time.sleep(REQUEST_DELAY_SEC)  # تجنب 429
                 except Exception as exc:
                     log.warning("tick فشل: %s", exc)
@@ -874,14 +912,6 @@ def main_loop():
                 except Exception as exc:
                     log.warning("calendar فشل: %s", exc)
                 last_calendar = now
-
-            # 7) إعادة قياس فارق التوقيت كل TZ_RECHECK_SEC
-            if now - last_tz_recheck >= TZ_RECHECK_SEC:
-                try:
-                    resolve_tz_offset()
-                except Exception:
-                    pass
-                last_tz_recheck = now
 
             # انتظار قصير قبل الدورة التالية
             time.sleep(POLL_TICKS_SEC)

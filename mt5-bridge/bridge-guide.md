@@ -47,7 +47,6 @@
 | `NEXUS_URL` | `https://preview-chat-<chat_id>.space-z.ai` | رابط المعاينة للجلسة الحالية على Z.ai — يتغير مع كل جلسة |
 | `NEXUS_BRIDGE_TOKEN` | `nxb-xxxxxxxxxxxxxxxx` | نفس `NEXUS_BRIDGE_TOKEN` في `.env` على الخادم |
 | `BRIDGE_SYMBOLS` | `XAUUSD` أو `XAUUSD:GOLD,BTCUSD` | الرموز المتداولة. إن كان اسم الوسيط مختلفًا استخدم صيغة `LOGICAL:broker` |
-| `BRIDGE_SERVER_TZ_OFFSET` | `auto` | يقيس فارق سيرفرك تلقائيًا — أو ضع رقمًا مثل `2.0` |
 | `BRIDGE_EXECUTE` | `false` | **اتركها false أولًا** — الجسر يرسل البيانات فقط |
 
 ### صيغة `BRIDGE_SYMBOLS`
@@ -104,21 +103,18 @@ python bridge.py
 | البيانات | التردد | الـ Endpoint |
 |---|---|---|
 | **Ticks** (bid/ask) | كل 5 ثوان | `POST /api/v2/bridge/ticks` |
-| **Bars** M5 | كل دقيقة (فقط عند شمعة جديدة) | `POST /api/v2/bridge/bars` |
+| **Bars** M5 مغلقة | كل دقيقة (آخر شمعة مغلقة جديدة فقط؛ يستبعد bar 0 الجاري) | `POST /api/v2/bridge/bars` |
 | **Heartbeat** (account + terminal) | كل 60 ثانية | `POST /api/v2/bridge/heartbeat` |
 | **Positions** snapshot | كل 30 ثانية | `POST /api/v2/bridge/positions` |
 | **Decision poll** | كل 120 ثانية | `GET /api/agents/decision/{symbol}` |
 | **Calendar** (إن تغيّر الملف) | كل 5 دقائق | `POST /api/v2/bridge/calendar` |
 | **Seed history** (1500 شمعة) | مرة واحدة عند البداية | `POST /api/v2/bridge/bars` |
 
-## التوقيت — تلقائي بالكامل
+## أساس التوقيت
 
-كل الشموع والـ ticks من MT5 تحمل **توقيت سيرفر الوسيط**، ونظام Yemen Smart يحتاج UTC. الجسر يحل هذا وحده:
+طوابع epoch الخاصة بالشموع والتيكات التي تعيدها واجهة MetaTrader5 Python تُحوّل مباشرة إلى ISO-8601 UTC؛ لا يطرح الجسر إزاحة وسيط عنها. لا تضبط `BRIDGE_SERVER_TZ_OFFSET` لتحريك هذه البيانات، ولا تستخدم فرق `TimeCurrent` و`TimeGMT` كقاعدة لتحويل التاريخ. إذا ظهر اختلاف ساعات، افحص قيمة المصدر الخام ومسار API والتخزين أولًا. يحتفظ وقت السيرفر الخام منفصلًا فقط عندما يقدمه مصدره صراحةً مع سياسة تحويل موثقة. في طلب الشموع من الموضع صفر، يكون العنصر الأخير هو الشمعة الجارية؛ الجسر يستبعده من البذر والتحديثات ويرسل آخر شمعة مكتملة فقط.
 
-1. **وضع `"auto"` (الافتراضي):** عند أول نشاط سوق يقيس الجسر الفارق من أحدث tick، ويعيد الفحص كل 30 دقيقة.
-2. **(اختياري) دقة 100% عبر EA رفيق `ZYSBTimeEA.mq5`** — يستخدم `TimeCurrent`/`TimeGMT` ويكتب الفارق في `zysb_server_time.json`.
-
-ترتيب الأولوية: رقم ثابت في `BRIDGE_SERVER_TZ_OFFSET` > ملف EA الرفيق > قياس تلقائي > افتراضي 2.0.
+يمكن إبقاء `ZYSBTimeEA.mq5` لأغراض تشخيص فرق ساعة السيرفر الحالية، لكنه ليس مطلوبًا لتحويل طوابع MT5 Python إلى UTC ولا يثبت إزاحة تاريخية صالحة لكل البيانات.
 
 ## تفعيل التنفيذ الفعلي (لاحقًا — بعد الثقة)
 
@@ -159,7 +155,7 @@ python bridge.py
 | `429 Too Many Requests` | زِد قيم `BRIDGE_POLL_*_SEC` في `.env` |
 | `trade_allowed=False` | فعّل زر Algo Trading في MT5 (Tools → Options → Expert Advisors) |
 | `انقطع اتصال MT5` | الجسر يعيد التهيئة تلقائيًا. إن استمر، أعد تشغيل MT5 |
-| الشموع متقدمة/متأخرة ساعات | اترك `BRIDGE_SERVER_TZ_OFFSET=auto` — سيقيس الفارق عند أول tick |
+| الشموع متقدمة/متأخرة ساعات | لا تضف إزاحة تلقائية؛ قارن epoch المصدر بقيمة UTC المرسلة وافحص إعدادات الطرفية والخادم |
 
 ## تبديل الخادم إلى وضع الجسر
 

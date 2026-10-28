@@ -14,12 +14,14 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from sklearn.metrics import accuracy_score, f1_score, log_loss
 
 from .models.xgboost_direction import XGBoostDirectionModel
 from .models.lightgbm_regime import LightGBMRegimeModel
 from .models.lstm_sequence import LSTMSequenceModel
 from .models.isolation_anomaly import AnomalyDetector
 from .models.random_forest_features import FeatureImportanceModel
+from .training_data import is_safe_feature_name, purge_boundary_sample, purge_overlapping_targets
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,7 @@ class WalkForwardConfig:
     compact_step_frac: float = 0.1
     compact_min_train: int = 600
     compact_min_val: int = 100
+    purge_gap_seconds: float = 0.0
 
 
 @dataclass
@@ -79,6 +82,7 @@ class WalkForwardTrainer:
         timestamps: np.ndarray,
         feature_names: list[str] | None = None,
         sequences: np.ndarray | None = None,
+        target_timestamps: np.ndarray | None = None,
     ) -> list[FoldResult]:
         """Full walk-forward pass over the dataset.
 
@@ -91,7 +95,42 @@ class WalkForwardTrainer:
         sequences  : optional (N, seq_len, n_features) for LSTM.
         """
         self._fold_results.clear()
+        if X.ndim != 2 or len(X) != len(y) or len(y) != len(timestamps):
+            raise ValueError("X, y, and timestamps must have aligned row counts")
+        if target_timestamps is not None and len(target_timestamps) != len(X):
+            raise ValueError("target_timestamps must align with X rows")
+        if not feature_names or len(feature_names) != X.shape[1]:
+            raise ValueError("Safe feature_names matching X columns are required")
+        safe_columns = [i for i, name in enumerate(feature_names) if is_safe_feature_name(name)]
+        if not safe_columns:
+            raise ValueError("No leakage-safe training features remain")
+        X = X[:, safe_columns]
+        feature_names = [feature_names[i] for i in safe_columns]
+        if sequences is not None:
+            if len(sequences) != len(X):
+                raise ValueError("sequences must align with X rows")
+            sequences = sequences[:, :, safe_columns]
+
+        order = np.argsort(np.asarray(timestamps, dtype="datetime64[ns]"), kind="stable")
+        X, y = X[order], y[order]
+        timestamps = np.asarray(timestamps)[order]
+        if target_timestamps is not None:
+            target_timestamps = np.asarray(target_timestamps)[order]
+        if sequences is not None:
+            sequences = sequences[order]
         folds = self._generate_folds(timestamps)
+        if target_timestamps is not None:
+            gap = np.timedelta64(int(max(0, self.cfg.purge_gap_seconds) * 1e9), "ns")
+            folds = [
+                (purge_overlapping_targets(
+                    train_mask, val_mask, timestamps, target_timestamps, gap=gap,
+                ), val_mask)
+                for train_mask, val_mask in folds
+            ]
+        else:
+            # Backward-compatible one-sample embargo for callers that have not
+            # yet persisted target timestamps. New data paths should pass them.
+            folds = [(purge_boundary_sample(train_mask), val_mask) for train_mask, val_mask in folds]
 
         mlflow_available = self._setup_mlflow()
 
@@ -128,6 +167,9 @@ class WalkForwardTrainer:
                 fold_result.metrics["xgboost"] = self._train_xgboost(
                     X_train, y_train, feature_names,
                 )
+                fold_result.metrics["xgboost_validation"] = self._evaluate_xgboost(
+                    X_val, y_val,
+                )
                 fold_result.metrics["lgbm_regime"] = self._train_lgbm(
                     X_train, y_train, feature_names,
                 )
@@ -150,7 +192,11 @@ class WalkForwardTrainer:
             self._fold_results.append(fold_result)
             logger.info("Fold %d complete — metrics: %s", fold_idx, fold_result.metrics)
 
-        self._save_all()
+        if not self._fold_results:
+            logger.error("No valid walk-forward folds; existing model files left untouched")
+            return []
+
+        trained_models = self._save_all()
         if feature_names:
             # Persisted separately because individual model.save()/.load()
             # round-trips only the fitted estimator, not this Python-level
@@ -158,7 +204,29 @@ class WalkForwardTrainer:
             # features to the exact column order training used.
             import json as _json
             (self.model_dir / "feature_names.json").write_text(_json.dumps(feature_names))
+        if trained_models:
+            from .training_data import LABEL_DEFINITION, TRAINING_SCHEMA_VERSION
+            import json as _json
+            (self.model_dir / "training_schema.json").write_text(_json.dumps({
+                "schema_version": TRAINING_SCHEMA_VERSION,
+                "label_definition": LABEL_DEFINITION,
+                "feature_names": feature_names,
+                "trained_models": trained_models,
+            }, indent=2))
         return list(self._fold_results)
+
+    def _evaluate_xgboost(self, X_val: np.ndarray, y_val: np.ndarray) -> dict[str, float]:
+        """Score the train-only fitted XGBoost model on untouched outer validation."""
+        model = getattr(self, "_xgb", None)
+        if model is None or not model.is_fitted or len(y_val) == 0:
+            return {}
+        y_pred = model.model.predict(X_val)
+        y_prob = model.model.predict_proba(X_val)[:, 1]
+        return {
+            "accuracy": float(accuracy_score(y_val, y_pred)),
+            "f1": float(f1_score(y_val, y_pred, zero_division=0)),
+            "log_loss": float(log_loss(y_val, y_prob, labels=[0, 1])),
+        }
 
     # ── Individual model trainers ─────────────────────────────────────────
 
@@ -286,7 +354,7 @@ class WalkForwardTrainer:
 
     # ── Persistence ───────────────────────────────────────────────────────
 
-    def _save_all(self) -> None:
+    def _save_all(self) -> list[str]:
         savers = [
             ("_xgb", "xgboost_direction.json"),
             ("_lgbm", "lgbm_regime.txt"),
@@ -294,13 +362,21 @@ class WalkForwardTrainer:
             ("_anomaly", "isolation_anomaly.joblib"),
             ("_rf", "rf_features.joblib"),
         ]
+        names = {
+            "_xgb": "xgboost", "_lgbm": "lgbm_regime", "_lstm": "lstm",
+            "_anomaly": "anomaly", "_rf": "rf_importance",
+        }
+        saved: list[str] = []
         for attr, filename in savers:
             model = getattr(self, attr, None)
             if model is not None:
                 try:
                     model.save(self.model_dir / filename, mlflow_run=False)
+                    if (self.model_dir / filename).is_file():
+                        saved.append(names[attr])
                 except Exception:
                     logger.error("Failed to save %s", attr, exc_info=True)
+        return saved
 
     # ── MLflow helpers ────────────────────────────────────────────────────
 

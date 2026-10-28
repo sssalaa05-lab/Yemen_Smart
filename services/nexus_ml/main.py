@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -19,7 +20,7 @@ from typing import Any
 
 import numpy as np
 import redis.asyncio as aioredis
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -42,11 +43,20 @@ from .calendar_features import (
 from .ensemble import EnsembleSignal, ModelEnsemble
 from .rule_based_signal import RuleBasedSignalGenerator
 from .training import WalkForwardConfig, WalkForwardTrainer
+from .training_data import (
+    build_pending_sample,
+    finalize_next_bar_sample,
+    is_eligible_training_record,
+    parse_utc_timestamp,
+    sanitize_training_features,
+    training_schema_is_safe,
+)
 
 logger = logging.getLogger(__name__)
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 MODEL_DIR = os.getenv("MODEL_DIR", "./models_store")
+MODEL_PROMOTION_TOKEN = os.getenv("NEXUS_ML_PROMOTION_TOKEN", "").strip()
 CONSUMER_GROUP = "nexus_ml_group"
 CONSUMER_NAME = "nexus_ml_worker_1"
 
@@ -70,6 +80,12 @@ class TrainRequest(BaseModel):
     train_months: int = 6
     val_months: int = 1
     step_months: int = 1
+
+
+class PromoteCandidateRequest(BaseModel):
+    symbol: str
+    candidate_id: str
+    confirmation: str
 
 
 class TrainResponse(BaseModel):
@@ -102,7 +118,6 @@ _start_time: float = 0.0
 _consumer_task: asyncio.Task[None] | None = None
 _training_in_progress: bool = False
 _last_signal_ts: dict[str, float] = {}
-_last_close_per_symbol: dict[str, float] = {}  # for label computation
 SIGNAL_COOLDOWN_SEC = int(os.getenv("NEXUS_ML_SIGNAL_COOLDOWN_SEC", "60"))
 
 # Auto-retrain config
@@ -168,8 +183,45 @@ async def _get_prepared_calendar() -> list[dict[str, Any]]:
 _ensembles: dict[str, ModelEnsemble] = {}
 
 
+def _has_directional_ml_model(status: dict[str, bool]) -> bool:
+    """Sentiment's lazy-loaded placeholder alone is not a trained predictor."""
+    return any(
+        loaded for name, loaded in status.items()
+        if name != "sentiment"
+    )
+
+
 def symbol_model_dir(symbol: str) -> Path:
     return Path(MODEL_DIR) / symbol.strip().upper()
+
+
+def candidate_model_dir(task_id: str, symbol: str) -> Path:
+    """Immutable-by-convention candidate location, isolated from champion files."""
+    return Path(MODEL_DIR) / "candidates" / task_id / symbol.strip().upper()
+
+
+def _write_candidate_receipt(
+    task_id: str, symbol: str, result_count: int, source: str,
+) -> Path:
+    import hashlib
+
+    directory = candidate_model_dir(task_id, symbol)
+    schema_path = directory / "training_schema.json"
+    if not schema_path.is_file():
+        raise RuntimeError("candidate lacks leakage-safe training schema receipt")
+    schema_bytes = schema_path.read_bytes()
+    receipt = {
+        "candidate_id": task_id,
+        "symbol": symbol.strip().upper(),
+        "source": source,
+        "status": "candidate_pending_approval",
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "fold_count": int(result_count),
+        "training_schema_sha256": hashlib.sha256(schema_bytes).hexdigest(),
+    }
+    path = directory / "candidate_receipt.json"
+    path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    return path
 
 
 def _get_symbol_ensemble(symbol: str) -> ModelEnsemble:
@@ -214,7 +266,7 @@ async def lifespan(app: FastAPI):
 
     # Rule-based fallback for when no ML models are trained yet
     _rule_based = RuleBasedSignalGenerator(confidence_threshold=0.35)
-    any_model_loaded = any(status.values())
+    any_model_loaded = _has_directional_ml_model(status)
     if not any_model_loaded:
         logger.warning(
             "No ML models loaded — using rule-based signal generator (real indicators)"
@@ -299,7 +351,7 @@ async def predict(symbol: str):
         logger.debug("Calendar enrichment skipped in predict", exc_info=True)
 
     ensemble = _get_symbol_ensemble(symbol)
-    any_model_loaded = any(ensemble.models_status().values())
+    any_model_loaded = _has_directional_ml_model(ensemble.models_status())
 
     if any_model_loaded:
         feature_array = ensemble.build_feature_array(features)
@@ -340,24 +392,105 @@ async def train(req: TrainRequest, background_tasks: BackgroundTasks):
 
     return TrainResponse(
         status="started",
-        message=f"Walk-forward training initiated for {req.symbols}",
+        message=f"Candidate-only walk-forward training started for {req.symbols}; champion remains unchanged",
         task_id=task_id,
     )
 
 
-async def _run_training(req: TrainRequest, task_id: str) -> None:
-    """Train each requested symbol into its OWN models_store/<SYMBOL>/ dir.
+@app.get("/api/ml/candidates/{candidate_id}")
+async def candidate_status(candidate_id: str):
+    if not candidate_id.replace("_", "").replace("-", "").isalnum():
+        raise HTTPException(400, "invalid candidate id")
+    root = Path(MODEL_DIR) / "candidates" / candidate_id
+    if not root.is_dir():
+        raise HTTPException(404, "candidate not found")
+    receipts = []
+    for receipt_path in sorted(root.glob("*/candidate_receipt.json")):
+        try:
+            receipts.append(json.loads(receipt_path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return {"candidate_id": candidate_id, "status": "candidate_pending_approval", "symbols": receipts}
 
-    Training per symbol (rather than pooling every symbol into one model set)
-    keeps an existing symbol's models untouched when another is retrained.
-    """
+
+@app.post("/api/ml/models/promote")
+async def promote_candidate(
+    req: PromoteCandidateRequest,
+    x_ml_promotion_token: str = Header(default=""),
+):
+    """Promote one reviewed candidate; disabled unless an approval secret is configured."""
+    import hashlib
+    import re
+    import tempfile
+
+    if not MODEL_PROMOTION_TOKEN:
+        raise HTTPException(503, "candidate promotion is disabled: configure NEXUS_ML_PROMOTION_TOKEN")
+    if x_ml_promotion_token != MODEL_PROMOTION_TOKEN:
+        raise HTTPException(403, "invalid promotion approval token")
+    symbol = req.symbol.strip().upper()
+    if not re.fullmatch(r"[A-Z0-9._-]{1,32}", symbol):
+        raise HTTPException(400, "invalid symbol")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", req.candidate_id):
+        raise HTTPException(400, "invalid candidate id")
+    if req.confirmation != f"PROMOTE {symbol} {req.candidate_id}":
+        raise HTTPException(400, "confirmation phrase does not match requested candidate")
+
+    candidate = candidate_model_dir(req.candidate_id, symbol)
+    receipt_path = candidate / "candidate_receipt.json"
+    schema_path = candidate / "training_schema.json"
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        schema_bytes = schema_path.read_bytes()
+        schema = json.loads(schema_bytes)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(404, "candidate receipt/schema unavailable") from exc
+    expected_hash = hashlib.sha256(schema_bytes).hexdigest()
+    if (receipt.get("candidate_id") != req.candidate_id
+            or receipt.get("symbol") != symbol
+            or receipt.get("training_schema_sha256") != expected_hash
+            or not training_schema_is_safe(schema)):
+        raise HTTPException(409, "candidate receipt or safe schema validation failed")
+
+    champion = symbol_model_dir(symbol)
+    versions = Path(MODEL_DIR) / "versions" / symbol
+    versions.mkdir(parents=True, exist_ok=True)
+    version_dir = versions / req.candidate_id
+    if version_dir.exists():
+        raise HTTPException(409, "candidate version already promoted")
+    shutil.copytree(candidate, version_dir)
+    champion.parent.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(tempfile.mkdtemp(prefix=f".{symbol}.promotion-", dir=champion.parent))
+    shutil.rmtree(temp_dir)
+    shutil.copytree(candidate, temp_dir)
+    backup: Path | None = None
+    try:
+        if champion.exists():
+            backup = versions / f"pre-{req.candidate_id}"
+            if backup.exists():
+                raise FileExistsError(f"backup version exists: {backup}")
+            os.replace(champion, backup)
+        os.replace(temp_dir, champion)
+    except Exception:
+        if backup is not None and backup.exists() and not champion.exists():
+            os.replace(backup, champion)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+    _ensembles.pop(symbol, None)
+    loaded_status = _get_symbol_ensemble(symbol).models_status()
+    return {"status": "promoted", "symbol": symbol, "candidate_id": req.candidate_id,
+            "previous_champion_version": backup.name if backup else None,
+            "loaded_models": loaded_status}
+
+
+async def _run_training(req: TrainRequest, task_id: str) -> None:
+    """Train isolated candidate artifacts; champion changes require promotion."""
     global _training_in_progress
     try:
         logger.info("[%s] Training started for %s", task_id, req.symbols)
 
         for symbol in req.symbols:
             sym = symbol.strip().upper()
-            out_dir = symbol_model_dir(sym)
+            out_dir = candidate_model_dir(task_id, sym)
             out_dir.mkdir(parents=True, exist_ok=True)
 
             data = await _fetch_training_data([sym])
@@ -373,14 +506,13 @@ async def _run_training(req: TrainRequest, task_id: str) -> None:
             )
             trainer = WalkForwardTrainer(cfg)
 
-            X, y, timestamps, feature_names = data
-            results = trainer.train_all_models(X, y, timestamps, feature_names)
+            X, y, timestamps, feature_names, target_timestamps = data
+            results = trainer.train_all_models(
+                X, y, timestamps, feature_names, target_timestamps=target_timestamps,
+            )
             logger.info("[%s] %s trained — %d folds → %s", task_id, sym, len(results), out_dir)
-
-            # Reload just this symbol's ensemble; others stay as they are.
-            _ensembles.pop(sym, None)
-            reloaded = _get_symbol_ensemble(sym)
-            logger.info("[%s] %s ensemble reloaded: %s", task_id, sym, reloaded.models_status())
+            if results:
+                _write_candidate_receipt(task_id, sym, len(results), source="redis_live_history")
 
     except Exception:
         logger.error("[%s] Training failed", task_id, exc_info=True)
@@ -605,7 +737,7 @@ async def _handle_feature_event(msg_id: str, raw: dict[str, str]) -> None:
 
         # Decide: this symbol's ML ensemble (if trained) or rule-based fallback
         ensemble = _get_symbol_ensemble(symbol)
-        any_model_loaded = any(ensemble.models_status().values())
+        any_model_loaded = _has_directional_ml_model(ensemble.models_status())
 
         if any_model_loaded:
             # Use trained ML models for THIS symbol
@@ -628,45 +760,38 @@ async def _handle_feature_event(msg_id: str, raw: dict[str, str]) -> None:
         # Filter to numeric-only for SignalEvent (Pydantic expects dict[str, float])
         numeric_features = {k: v for k, v in features_dict.items() if isinstance(v, (int, float))}
 
-        # Accumulate feature history for model training on EVERY processed bar —
-        # not just bars that happen to produce an actionable BUY/SELL verdict.
-        # Gating this behind the NO_TRADE return starved the walk-forward
-        # trainer's min_train_samples threshold for weeks (rule-based/ensemble
-        # signals are NO_TRADE most of the time by design).
+        # Training target is the direction of the NEXT adjacent completed bar.
+        # Keep the current bar as pending; only finalize the preceding row when
+        # its next bar arrives. Raw OHLC/close and target-like keys are excluded
+        # from X by sanitize_training_features(). Legacy history is not reused.
         try:
-            from datetime import datetime, timezone as _tz
-            close = float(features_dict.get("close", 0))
-            # Label: compare current close to previous bar's close for this symbol.
-            # prev_close is NOT in the feature dict (nexus-features doesn't expose it),
-            # so we track the last seen close in-process.
-            prev_close = _last_close_per_symbol.get(symbol, close)
-            label = 1 if close > prev_close else 0
-            _last_close_per_symbol[symbol] = close
-            ohlcv = {
-                "open": float(features_dict.get("open", 0)),
-                "high": float(features_dict.get("high", 0)),
-                "low": float(features_dict.get("low", 0)),
-                "close": close,
-                "volume": float(features_dict.get("volume", 0)),
-            }
-            history_key = f"nexus:features:history:{symbol}"
-            # Timestamp: features don't carry a bar timestamp; use the event's
-            # arrival time (UTC) so walk-forward folds can group by month.
-            ts = (
-                features_dict.get("timestamp")
-                or raw.get("timestamp")
-                or datetime.now(_tz.utc).isoformat()
-            )
-            record = json.dumps({
-                "features": numeric_features,
-                "label": label,
-                "ohlcv": ohlcv,
-                "timestamp": ts,
-            })
-            await _redis.rpush(history_key, record)
-            await _redis.ltrim(history_key, -10000, -1)
+            close = features_dict.get("close")
+            bar_timestamp = features_dict.get("bar_timestamp")
+            if close is not None and bar_timestamp:
+                current_ts = parse_utc_timestamp(bar_timestamp)
+                current_pending = build_pending_sample(
+                    features_dict, bar_timestamp, close,
+                )
+                pending_key = f"nexus:features:pending:{symbol}:{timeframe}"
+                pending_raw = await _redis.get(pending_key)
+                pending = json.loads(pending_raw) if pending_raw else None
+                previous_ts = parse_utc_timestamp(pending.get("timestamp")) if pending else None
+
+                # Ignore duplicate/out-of-order events; they must not relabel or
+                # replace a newer pending sample.
+                if current_pending and current_ts and (
+                    previous_ts is None or current_ts > previous_ts
+                ):
+                    labeled = finalize_next_bar_sample(
+                        pending, bar_timestamp, close, timeframe,
+                    )
+                    if labeled:
+                        history_key = f"nexus:features:history:{symbol}"
+                        await _redis.rpush(history_key, json.dumps(labeled))
+                        await _redis.ltrim(history_key, -10000, -1)
+                    await _redis.set(pending_key, json.dumps(current_pending))
         except Exception:
-            logger.debug("Failed to accumulate feature history", exc_info=True)
+            logger.warning("Leakage-safe training sample accumulation failed for %s", symbol, exc_info=True)
 
         if verdict == Verdict.NO_TRADE:
             await _redis.xack(RedisStream.FEATURE_STREAM, CONSUMER_GROUP, msg_id)
@@ -723,33 +848,35 @@ async def _get_latest_features(symbol: str) -> dict[str, float] | None:
 
 async def _fetch_training_data(
     symbols: list[str],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]] | None:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], np.ndarray] | None:
     """Fetch historical feature data from Redis/DuckDB for training.
 
     Returns (X, y, timestamps, feature_names) or None if no data.
     """
     assert _redis is not None
 
-    # Calendar snapshot for backfilling records that predate ingestion-time
-    # enrichment (idempotent — records already carrying cal_* keep them).
+    # Calendar snapshot for point-in-time backfill on eligible v2 rows only.
     prepared_calendar = await _get_prepared_calendar()
 
     all_features: list[list[float]] = []
     all_labels: list[int] = []
     all_timestamps: list[str] = []
+    all_target_timestamps: list[str] = []
     feature_names: list[str] = []
 
     for symbol in symbols:
         history_key = f"nexus:features:history:{symbol}"
         raw_list = await _redis.lrange(history_key, 0, -1)
 
-        # Anchor the schema to the NEWEST record so live predictions (which use
-        # the current feature set) match the trained matrix; older records fill
-        # missing keys with 0.0 below instead of dropping new live features.
+        # Anchor the schema only to a new, versioned, finalized record. Legacy
+        # rows used same-bar labels and may contain leaked prices, so skip them.
         for _raw in reversed(raw_list):
             try:
-                _lf = json.loads(_raw).get("features", {})
-                _lk = [k for k in _lf.keys() if isinstance(_lf[k], (int, float))]
+                _record = json.loads(_raw)
+                if not is_eligible_training_record(_record):
+                    continue
+                _lf = sanitize_training_features(_record.get("features", {}))
+                _lk = list(_lf)
                 if _lk:
                     feature_names = _lk
                     break
@@ -765,11 +892,14 @@ async def _fetch_training_data(
         for raw in raw_list:
             try:
                 record = json.loads(raw)
-                feats = record.get("features", {})
+                if not is_eligible_training_record(record):
+                    continue
+                feats = sanitize_training_features(record.get("features", {}))
                 label = record.get("label")
                 ts = record.get("timestamp", "")
+                target_ts = record.get("target_timestamp", "")
 
-                if not feats or label is None:
+                if not feats or label not in (0, 1) or parse_utc_timestamp(target_ts) is None:
                     continue
 
                 if not feature_names:
@@ -795,9 +925,11 @@ async def _fetch_training_data(
                             exc_info=True,
                         )
 
-                all_features.append([feats.get(k, 0.0) for k in feature_names])
+                safe_feats = sanitize_training_features(feats)
+                all_features.append([safe_feats.get(k, 0.0) for k in feature_names])
                 all_labels.append(int(label))
                 all_timestamps.append(ts)
+                all_target_timestamps.append(target_ts)
             except (json.JSONDecodeError, TypeError, ValueError):
                 continue
 
@@ -806,9 +938,39 @@ async def _fetch_training_data(
 
     X = np.array(all_features, dtype=np.float64)
     y = np.array(all_labels, dtype=np.int64)
-    timestamps = np.array(all_timestamps, dtype="datetime64[s]")
+    timestamps = np.array([
+        np.datetime64(parse_utc_timestamp(ts).replace(tzinfo=None), "s")
+        for ts in all_timestamps
+    ], dtype="datetime64[s]")
+    target_timestamps = np.array([
+        np.datetime64(parse_utc_timestamp(ts).replace(tzinfo=None), "s")
+        for ts in all_target_timestamps
+    ], dtype="datetime64[s]")
 
-    return X, y, timestamps, feature_names
+    # Make walk-forward input deterministic and chronological, and drop any
+    # duplicate sample timestamps before fold generation.
+    order = np.argsort(timestamps, kind="stable")
+    X, y, timestamps, target_timestamps = X[order], y[order], timestamps[order], target_timestamps[order]
+    if len(timestamps) > 1:
+        keep = np.concatenate(([True], timestamps[1:] > timestamps[:-1]))
+        X, y, timestamps, target_timestamps = X[keep], y[keep], timestamps[keep], target_timestamps[keep]
+
+    return X, y, timestamps, feature_names, target_timestamps
+
+
+async def _count_eligible_training_samples(symbols: list[str]) -> int:
+    """Count only finalized schema-v2 rows; exclude legacy contaminated data."""
+    assert _redis is not None
+    total = 0
+    for symbol in symbols:
+        raw_list = await _redis.lrange(f"nexus:features:history:{symbol}", 0, -1)
+        for raw in raw_list:
+            try:
+                if is_eligible_training_record(json.loads(raw)):
+                    total += 1
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+    return total
 
 
 async def _auto_retrain_loop() -> None:
@@ -837,12 +999,8 @@ async def _auto_retrain_loop() -> None:
                     await asyncio.sleep(_RETRAIN_CHECK_INTERVAL)
                     continue
 
-            # Check sample count across all symbols
-            total_samples = 0
-            for sym in _RETRAIN_SYMBOLS:
-                key = f"nexus:features:history:{sym}"
-                count = await _redis.llen(key)
-                total_samples += count
+            # Count only finalized, versioned leakage-safe samples.
+            total_samples = await _count_eligible_training_samples(_RETRAIN_SYMBOLS)
 
             if total_samples < _RETRAIN_MIN_SAMPLES:
                 logger.info(
@@ -862,22 +1020,19 @@ async def _auto_retrain_loop() -> None:
             _training_in_progress = True
 
             try:
-                # Retrain each symbol into its own models_store/<SYMBOL>/ so a
-                # BTC retrain never overwrites the gold models (and vice versa).
+                # Auto-retraining may create candidates, never promote them.
                 total_folds = 0
-                new_status: dict[str, dict[str, bool]] = {}
+                candidates: dict[str, str] = {}
                 for sym in _RETRAIN_SYMBOLS:
-                    old_status = _get_symbol_ensemble(sym).models_status()
-
                     data = await _fetch_training_data([sym])
                     if data is None:
                         logger.warning("auto_retrain.no_data symbol=%s", sym)
                         continue
 
-                    out_dir = symbol_model_dir(sym)
+                    out_dir = candidate_model_dir(task_id, sym)
                     out_dir.mkdir(parents=True, exist_ok=True)
 
-                    X, y, timestamps, feature_names = data
+                    X, y, timestamps, feature_names, target_timestamps = data
                     cfg = WalkForwardConfig(
                         train_months=6,
                         val_months=1,
@@ -885,16 +1040,14 @@ async def _auto_retrain_loop() -> None:
                         model_dir=str(out_dir),
                     )
                     trainer = WalkForwardTrainer(cfg)
-                    results = trainer.train_all_models(X, y, timestamps, feature_names)
-                    total_folds += len(results)
-
-                    _ensembles.pop(sym, None)
-                    reloaded = _get_symbol_ensemble(sym).models_status()
-                    new_status[sym] = reloaded
-                    logger.info(
-                        "auto_retrain.symbol_done symbol=%s folds=%d old=%s new=%s",
-                        sym, len(results), old_status, reloaded,
+                    results = trainer.train_all_models(
+                        X, y, timestamps, feature_names, target_timestamps=target_timestamps,
                     )
+                    total_folds += len(results)
+                    if results:
+                        _write_candidate_receipt(task_id, sym, len(results), source="redis_live_history")
+                        candidates[sym] = str(out_dir)
+                    logger.info("auto_retrain.candidate_done symbol=%s folds=%d path=%s", sym, len(results), out_dir)
 
                 logger.info("auto_retrain.complete folds=%d task=%s", total_folds, task_id)
                 await _redis.set(_RETRAIN_LAST_KEY, str(time.time()), ex=86_400 * 7)
@@ -907,7 +1060,9 @@ async def _auto_retrain_loop() -> None:
                             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                             "samples": int(total_samples),
                             "folds": total_folds,
-                            "models": new_status,
+                            "candidate_id": task_id,
+                            "candidates": candidates,
+                            "champion_unchanged": True,
                         }),
                         ex=86_400 * 2,
                     )
