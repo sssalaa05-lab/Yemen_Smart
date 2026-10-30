@@ -1,0 +1,3 @@
+# Test runner dependencies; keep separate from production requirements.txt.
+pytest>=8.4,<10
+pytest-asyncio>=1.0,<2.0

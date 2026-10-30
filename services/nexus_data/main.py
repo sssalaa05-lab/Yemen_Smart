@@ -7,6 +7,7 @@ data-feed connector, the DuckDB store, and the Redis tick cache.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import math
 import os
 from contextlib import asynccontextmanager
@@ -63,6 +64,8 @@ SYNTHETIC_FALLBACK = os.getenv("NEXUS_DATA_SYNTHETIC_FALLBACK", "0").lower() in 
 # prices via yfinance — slightly delayed, see _yahoo_feed_loop) .
 DATA_SOURCE = os.getenv("NEXUS_DATA_SOURCE", "mt5").strip().lower()
 BRIDGE_TOKEN = os.getenv("NEXUS_BRIDGE_TOKEN", "").strip()
+INTERNAL_SERVICE_TOKEN = os.getenv("NEXUS_INTERNAL_SERVICE_TOKEN", "").strip()
+_REVISION_INGEST_CALLERS = {"nexus-news", "nexus-features"}
 YAHOO_POLL_SEC = float(os.getenv("NEXUS_YAHOO_POLL_SEC", "15"))
 
 # Logical Nexus symbol → Yahoo ticker. Gold spot has no direct Yahoo ticker,
@@ -950,7 +953,7 @@ async def health_check() -> dict[str, Any]:
 async def get_ticks(
     symbol: str,
     count: int = Query(default=50, ge=1, le=1000),
-    source: str = Query(default="cache", regex="^(cache|db)$"),
+    source: str = Query(default="cache", pattern="^(cache|db)$"),
 ) -> list[Tick]:
     """Return the most recent ticks for *symbol*."""
     symbol = symbol.upper().replace("/", "")
@@ -1103,6 +1106,14 @@ class _BridgeBar(BaseModel):
 def _bridge_ok(request: Request) -> None:
     if BRIDGE_TOKEN and request.headers.get("x-bridge-token") != BRIDGE_TOKEN:
         raise HTTPException(401, "invalid bridge token")
+
+
+def _internal_service_ok(request: Request) -> None:
+    if len(INTERNAL_SERVICE_TOKEN) < 32:
+        raise HTTPException(503, "internal source-revision ingestion is not configured")
+    supplied = request.headers.get("x-nexus-service-token", "")
+    if not supplied or not hmac.compare_digest(supplied, INTERNAL_SERVICE_TOKEN):
+        raise HTTPException(401, "invalid internal service token")
 
 
 @app.post("/api/data/ingest/ticks")
@@ -1304,6 +1315,28 @@ async def bridge_ingest_calendar(request: Request, body: dict[str, Any]):
         )
         await log.ainfo("bridge.calendar_ingested", accepted=len(cleaned))
     return {"accepted": len(cleaned), "received": len(received)}
+
+
+@app.post("/api/data/ingest/source-revisions")
+async def ingest_source_revisions(request: Request, body: dict[str, Any]):
+    """Internal append-only point-in-time archive; DuckDB remains data-owned."""
+    _internal_service_ok(request)
+    caller = str(body.get("caller_service") or "").strip()
+    if caller not in _REVISION_INGEST_CALLERS:
+        raise HTTPException(403, "caller is not allowed to ingest source revisions")
+    records = body.get("records")
+    if not isinstance(records, list) or not records:
+        raise HTTPException(422, "records must be a non-empty list")
+    if len(records) > 500:
+        raise HTTPException(413, "at most 500 source revisions may be submitted per batch")
+    try:
+        accepted = await data_store.persist_source_revisions(records, caller_service=caller)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        await log.aexception("source_revisions_persist_failed", caller_service=caller)
+        raise HTTPException(500, "source revisions could not be persisted") from exc
+    return {"accepted": accepted, "received": len(records)}
 
 
 # ── Subscribe endpoint ───────────────────────────────────────────────────────

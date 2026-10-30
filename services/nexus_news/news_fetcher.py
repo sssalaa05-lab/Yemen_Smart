@@ -93,22 +93,31 @@ def _score_rss_item(title: str) -> tuple[str, float]:
     return label, round(kw, 3)
 
 
-def _parse_rss_date(raw: str | None) -> datetime:
-    """Parse RSS pubDate — RFC822 ('Mon, 26 Oct 2026 …') or ISO-like
-    ('2026-10-26 23:06:05', used by investing.com). Falls back to now."""
+def _parse_rss_date_optional(raw: str | None) -> datetime | None:
+    """Parse a provider publication time, returning None rather than inventing one."""
     if raw:
         raw = raw.strip()
         try:
-            return parsedate_to_datetime(raw).astimezone(timezone.utc)
+            parsed = parsedate_to_datetime(raw)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
         except (TypeError, ValueError):
             pass
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S%z"):
             try:
                 dt = datetime.strptime(raw, fmt)
-                return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone.utc)
             except ValueError:
                 continue
-    return datetime.now(timezone.utc)
+    return None
+
+
+def _parse_rss_date(raw: str | None) -> datetime:
+    """Compatibility parser; current PIT ingestion uses the optional variant."""
+    return _parse_rss_date_optional(raw) or datetime.now(timezone.utc)
 
 
 # ── Rate limiter ─────────────────────────────────────────────────────────────
@@ -202,16 +211,19 @@ class NewsFetcher:
             if not headline:
                 continue
 
-            published = article.get("publishedAt", "")
-            ts = _parse_iso(published) if published else datetime.now(timezone.utc)
+            published_at = _parse_iso_optional(article.get("publishedAt"))
+            ts = published_at or datetime.now(timezone.utc)
 
             items.append(
                 NewsItem(
                     id=_headline_hash(headline),
-                    revision_id=_news_revision_id(article.get("source", {}).get("name", "NewsAPI"), headline, ts),
+                    revision_id=_news_revision_id("newsapi", headline, published_at, article.get("source", {}).get("name", "")),
+                    source_record_id=article.get("url"),
                     headline=headline,
                     source=article.get("source", {}).get("name", "NewsAPI"),
+                    provider="newsapi",
                     timestamp=ts,
+                    published_at=published_at,
                     available_at=datetime.now(timezone.utc),
                     affected_currencies=_map_currencies(headline),
                 )
@@ -259,16 +271,19 @@ class NewsFetcher:
             if not headline:
                 continue
 
-            published = article.get("publishedAt", "")
-            ts = _parse_iso(published) if published else datetime.now(timezone.utc)
+            published_at = _parse_iso_optional(article.get("publishedAt"))
+            ts = published_at or datetime.now(timezone.utc)
 
             items.append(
                 NewsItem(
                     id=_headline_hash(headline),
-                    revision_id=_news_revision_id(article.get("source", {}).get("name", "GNews"), headline, ts),
+                    revision_id=_news_revision_id("gnews", headline, published_at, article.get("source", {}).get("name", "")),
+                    source_record_id=article.get("url"),
                     headline=headline,
                     source=article.get("source", {}).get("name", "GNews"),
+                    provider="gnews",
                     timestamp=ts,
+                    published_at=published_at,
                     available_at=datetime.now(timezone.utc),
                     affected_currencies=_map_currencies(headline),
                 )
@@ -302,15 +317,19 @@ class NewsFetcher:
             headline = (entry.findtext("title") or "").strip()
             if not headline:
                 continue
-            ts = _parse_rss_date(entry.findtext("pubDate"))
+            published_at = _parse_rss_date_optional(entry.findtext("pubDate"))
+            ts = published_at or datetime.now(timezone.utc)
             label, score = _score_rss_item(headline)
             items.append(
                 NewsItem(
                     id=_headline_hash(headline),
-                    revision_id=_news_revision_id(source["name"], headline, ts, label, score),
+                    revision_id=_news_revision_id(source["name"], headline, published_at, label, score),
+                    source_record_id=entry.findtext("guid") or entry.findtext("link"),
                     headline=headline,
                     source=source["name"],
+                    provider=source["name"],
                     timestamp=ts,
+                    published_at=published_at,
                     available_at=datetime.now(timezone.utc),
                     impact=_rss_impact(headline),
                     sentiment=label,
@@ -356,7 +375,10 @@ class NewsFetcher:
         now = time.monotonic()
 
         for item in items:
-            h = _headline_hash(item.headline)
+            revision_key = item.revision_id or _headline_hash(item.headline)
+            h = hashlib.sha256(
+                f"{(item.provider or item.source).strip().lower()}|{revision_key}".encode("utf-8")
+            ).hexdigest()
             if h not in self._seen_hashes:
                 self._seen_hashes[h] = now
                 unique.append(item)
@@ -377,9 +399,12 @@ def _headline_hash(headline: str) -> str:
     return hashlib.sha256(normalised.encode()).hexdigest()[:16]
 
 
-def _news_revision_id(source: str, headline: str, published_at: datetime, *derived: Any) -> str:
+def _news_revision_id(
+    source: str, headline: str, published_at: datetime | None, *derived: Any,
+) -> str:
     """Stable content revision key; availability is recorded separately."""
-    material = "|".join((source.strip().lower(), headline.strip(), published_at.isoformat(), *(str(x) for x in derived)))
+    published_key = published_at.isoformat() if published_at else "published-time-unknown"
+    material = "|".join((source.strip().lower(), headline.strip(), published_key, *(str(x) for x in derived)))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
 
 
@@ -419,8 +444,18 @@ def _symbols_to_queries(symbols: list[str]) -> list[str]:
     return [keyword_map.get(q, q) for q in queries]
 
 
-def _parse_iso(raw: str) -> datetime:
+def _parse_iso_optional(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except (ValueError, TypeError):
-        return datetime.now(timezone.utc)
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_iso(raw: str) -> datetime:
+    """Compatibility parser for legacy callers; unknown times fall back to now."""
+    return _parse_iso_optional(raw) or datetime.now(timezone.utc)

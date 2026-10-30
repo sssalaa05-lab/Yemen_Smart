@@ -241,10 +241,9 @@ def sample_news_item() -> NewsItem:
 @pytest_asyncio.fixture()
 async def api_client(redis_client: RedisClient) -> AsyncIterator[AsyncClient]:
     """Build an AsyncClient wired to the nexus-api app with mocked deps."""
-    from services.nexus_api.main import create_app
+    from services.nexus_api.main import app
     from services.nexus_api.deps import get_redis, get_duckdb
 
-    app = create_app()
     mock_db = AsyncMock()
     mock_db.query = AsyncMock(return_value=[])
 

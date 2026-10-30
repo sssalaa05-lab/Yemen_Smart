@@ -1,6 +1,7 @@
 """Tests for A1 — MarketAnalystAgent."""
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -34,13 +35,20 @@ class TestMarketAnalystAgent:
             mock_sr.return_value = {"support": [1.08], "resistance": [1.09]}
             mock_pat.return_value = ["bullish_engulfing"]
 
-            with patch.object(agent, "_get_llm") as mock_llm:
-                mock_response = AsyncMock()
-                mock_response.content = "Strong uptrend on M15 with RSI at 55"
-                mock_chain = AsyncMock()
-                mock_chain.ainvoke = AsyncMock(return_value=mock_response)
-                mock_llm.return_value.__or__ = lambda self, other: mock_chain
+            mock_chain = SimpleNamespace(
+                ainvoke=AsyncMock(return_value=SimpleNamespace(
+                    content="Strong uptrend on M15 with RSI at 55",
+                )),
+            )
 
+            class PromptStub:
+                def __or__(self, _llm):
+                    return mock_chain
+
+            with (
+                patch.object(agent, "_get_llm", return_value=object()),
+                patch.object(agent, "_load_prompt", return_value=PromptStub()),
+            ):
                 result = await agent.invoke(state)
 
             assert result["technical_analysis"] != ""

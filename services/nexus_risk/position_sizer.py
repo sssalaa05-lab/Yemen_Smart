@@ -9,6 +9,7 @@ over-allocates even when win-rate appears favourable.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -122,8 +123,19 @@ class PositionSizer:
         avg_loss: float = 0.0,
         profit_edge_mult: float = 1.0,
     ) -> SizingResult:
+        inputs = (balance, risk_pct, entry, sl, win_rate, avg_win, avg_loss, profit_edge_mult)
+        try:
+            finite_inputs = all(math.isfinite(float(value)) for value in inputs)
+        except (TypeError, ValueError):
+            finite_inputs = False
+        if not finite_inputs:
+            return SizingResult(
+                lots=0.0, risk_pct_used=0.0, kelly_fraction=0.0,
+                vol_factor=0.0, tilt_factor=0.0, session_factor=0.0,
+                capped=True, reason="Non-finite sizing input",
+            )
         pip_distance = abs(entry - sl)
-        if pip_distance == 0 or balance <= 0:
+        if pip_distance == 0 or balance <= 0 or risk_pct < 0:
             return SizingResult(
                 lots=0.0, risk_pct_used=0.0, kelly_fraction=0.0,
                 vol_factor=0.0, tilt_factor=0.0, session_factor=0.0,

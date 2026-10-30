@@ -24,9 +24,10 @@ class TestFeatureServiceFiles:
 
 class TestIndicatorsImport:
     def test_importable(self):
-        from services.nexus_features.indicators import (  # noqa: F401
-            compute_indicators,
-        ) if hasattr(__import__("services.nexus_features.indicators", fromlist=["compute_indicators"]), "compute_indicators") else None
+        import importlib
+
+        mod = importlib.import_module("services.nexus_features.indicators")
+        assert mod is not None
 
 
 class TestKeyLevelsImport:

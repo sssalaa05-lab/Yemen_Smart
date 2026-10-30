@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -48,7 +48,7 @@ def _hourly_bars(count: int = 240) -> list[dict]:
 def test_mtf_uses_sorted_closed_bars_no_later_than_decision_time() -> None:
     bars = _hourly_bars()
     latest_closed = bars[-1]["timestamp"]
-    decision_time = pd.Timestamp(latest_closed) + pd.Timedelta(hours=1)
+    decision_time = datetime.fromisoformat(latest_closed.replace("Z", "+00:00")) + timedelta(hours=1)
     forming_bar = {
         **bars[-1],
         "timestamp": decision_time.isoformat(),
@@ -59,14 +59,14 @@ def test_mtf_uses_sorted_closed_bars_no_later_than_decision_time() -> None:
     }
     future_bar = {
         **forming_bar,
-        "timestamp": (decision_time + pd.Timedelta(hours=1)).isoformat(),
+        "timestamp": (decision_time + timedelta(hours=1)).isoformat(),
         "close": 1200.0,
     }
     # Deliberately reverse input order: the selected row must be the latest
     # timestamp whose entire bar interval ended at or before decision_time.
     redis = _MemoryRedis({"nexus:ohlcv:XAUUSD:H1": json.dumps([future_bar, forming_bar, *bars[::-1]])})
     result = asyncio.run(aggregate_features(
-        "XAUUSD", ["H1"], redis=redis, as_of=decision_time.to_pydatetime(),
+        "XAUUSD", ["H1"], redis=redis, as_of=decision_time,
     ))
     assert result["H1"]["_source_bar_timestamp"] == latest_closed
     assert result["H1"]["_available_at"] == decision_time.isoformat()
@@ -74,11 +74,11 @@ def test_mtf_uses_sorted_closed_bars_no_later_than_decision_time() -> None:
 
 def test_feature_service_closed_bar_gate_rejects_open_and_untimed_bars() -> None:
     bars = pd.DataFrame(_hourly_bars(4))
-    decision_time = pd.Timestamp(bars.iloc[-1]["timestamp"]) + pd.Timedelta(minutes=30)
-    closed = _closed_ohlcv_frame(bars, "H1", decision_time.to_pydatetime())
+    decision_time = datetime.fromisoformat(str(bars.iloc[-1]["timestamp"])) + timedelta(minutes=30)
+    closed = _closed_ohlcv_frame(bars, "H1", decision_time)
     assert len(closed) == 3
     assert closed.iloc[-1]["timestamp"].isoformat() == bars.iloc[-2]["timestamp"]
-    assert _closed_ohlcv_frame(bars.drop(columns=["timestamp"]), "H1", decision_time.to_pydatetime()).empty
+    assert _closed_ohlcv_frame(bars.drop(columns=["timestamp"]), "H1", decision_time).empty
 
 
 def test_swing_point_is_not_reported_until_right_hand_confirmation_bars_exist() -> None:
@@ -144,8 +144,8 @@ def test_cross_asset_snapshot_uses_only_the_supplied_gold_prefix() -> None:
 
 
 def test_cross_asset_rejects_snapshots_observed_after_decision_time() -> None:
-    decision = datetime.now(timezone.utc)
-    future = (pd.Timestamp(decision) + pd.Timedelta(minutes=2)).isoformat()
+    decision = datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc)
+    future = (decision + timedelta(minutes=2)).isoformat()
     redis = _MemoryRedis({
         "nexus:cross_asset:DXY": json.dumps({
             "level": 110.0, "change_5d": 3.0, "rsi_14": 80.0,
@@ -176,3 +176,23 @@ def test_institutional_price_features_are_deterministic_on_each_asof_prefix() ->
         assert first == second
         assert first["tick_imbalance"]["tick_imbalance"] == engine.tick_rule_imbalance(prefix)["tick_imbalance"]
         assert first["rv_ratio"]["rv_ratio"] == engine.realized_volatility_ratio(prefix)["rv_ratio"]
+
+
+def test_cross_asset_revision_record_excludes_fallbacks_and_is_stable() -> None:
+    from services.nexus_features.cross_asset import _source_revision_record
+
+    snapshot = {
+        "level": 104.25,
+        "change_5d": 0.2,
+        "source": "yfinance",
+        "fetched_at": "2026-10-28T12:00:00+00:00",
+    }
+    first = _source_revision_record("DXY", snapshot)
+    redelivery = _source_revision_record("DXY", {**snapshot, "fetched_at": "2026-10-28T12:05:00+00:00"})
+
+    assert first is not None and redelivery is not None
+    assert first["revision_id"] == redelivery["revision_id"]
+    assert first["available_at"] != redelivery["available_at"]
+    assert "fetched_at" not in first["payload"]
+    assert _source_revision_record("DXY", {**snapshot, "source": "dynamic_gold_proxy"}) is None
+    assert _source_revision_record("DXY", {**snapshot, "fetched_at": "2026-10-28T12:00:00"}) is None

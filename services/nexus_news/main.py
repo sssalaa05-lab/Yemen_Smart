@@ -9,6 +9,7 @@ when high-impact news is detected.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from contextlib import asynccontextmanager
@@ -28,6 +29,7 @@ from shared.constants import (
 )
 from shared.events import NewsAlertEvent
 from shared.models import CalendarEvent, NewsItem
+from shared.source_revision_client import submit_source_revisions
 
 from .calendar_parser import CalendarParser
 from .news_fetcher import NewsFetcher
@@ -62,6 +64,7 @@ CALENDAR_POLL_SEC = int(os.getenv("CALENDAR_POLL_SEC", "300"))
 NEWS_CACHE_KEY = f"{REDIS_KEY_PREFIX}news:latest"
 NEWS_CACHE_TTL = int(os.getenv("NEWS_CACHE_TTL_SEC", "7200"))
 NEWS_BUFFER_CAP = int(os.getenv("NEWS_BUFFER_CAP", "80"))
+SOURCE_ARCHIVE_ENABLED = len(os.getenv("NEXUS_INTERNAL_SERVICE_TOKEN", "").strip()) >= 32
 
 DEFAULT_SYMBOLS = [
     "XAUUSD",
@@ -77,6 +80,7 @@ _sentiment: SocialSentiment | None = None
 _latest_news: list[NewsItem] = []
 _latest_calendar: list[CalendarEvent] = []
 _bg_tasks: list[asyncio.Task[None]] = []
+_pending_source_revisions: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 
 # ── Request / response schemas ───────────────────────────────────────────────
 
@@ -107,6 +111,11 @@ async def lifespan(app: FastAPI):
     global _redis, _fetcher, _calendar, _sentiment  # noqa: PLW0603
 
     log.info("nexus_news_starting", port=8005)
+    if not SOURCE_ARCHIVE_ENABLED:
+        log.warning(
+            "source_revision_archive_disabled",
+            reason="NEXUS_INTERNAL_SERVICE_TOKEN missing or shorter than 32 characters",
+        )
 
     _redis = aioredis.from_url(REDIS_URL, decode_responses=True)
     _fetcher = NewsFetcher(newsapi_key=NEWSAPI_KEY, gnews_key=GNEWS_KEY)
@@ -321,19 +330,23 @@ def _merge_news(
 ) -> list[NewsItem]:
     """Rolling merge: dedupe by id, newest first, capped."""
     first_observed = {
-        item.revision_id: item.available_at
+        ((item.provider or item.source).strip().lower(), item.revision_id): item.available_at
         for item in existing
         if item.revision_id and item.available_at is not None
     }
     for item in incoming:
-        if item.revision_id in first_observed:
-            item.available_at = first_observed[item.revision_id]
-    seen: set[str] = set()
+        provider_revision = ((item.provider or item.source).strip().lower(), item.revision_id)
+        if provider_revision in first_observed:
+            item.available_at = first_observed[provider_revision]
+    seen: set[tuple[str, str]] = set()
     merged: list[NewsItem] = []
     for item in sorted(
         [*incoming, *existing], key=lambda n: n.timestamp, reverse=True
     ):
-        key = item.id or item.headline.lower().strip()
+        key = (
+            (item.provider or item.source).strip().lower(),
+            item.source_record_id or item.id or item.headline.lower().strip(),
+        )
         if key in seen:
             continue
         seen.add(key)
@@ -355,12 +368,113 @@ async def _write_news_cache(items: list[NewsItem]) -> None:
         log.error("news_cache_write_error", error=str(exc))
 
 
+def _news_revision_record(item: NewsItem) -> dict[str, Any] | None:
+    if not item.available_at or not item.source.strip():
+        return None
+    provider_id = (item.source_record_id or "").strip()
+    fallback_id = item.id or hashlib.sha256(item.headline.encode("utf-8")).hexdigest()[:24]
+    identity_material = provider_id or fallback_id
+    entity_id = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()[:32]
+    payload = {
+        "headline": item.headline,
+        "source": item.source,
+        "impact": item.impact,
+        "derived_sentiment": item.sentiment,
+        "derived_score": item.finbert_score,
+        "affected_currencies": list(item.affected_currencies),
+        "published_at": item.published_at.isoformat() if item.published_at else None,
+    }
+    revision_id = item.revision_id or hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:32]
+    return {
+        "dataset": "news",
+        "provider": item.provider or item.source,
+        "entity_id": entity_id,
+        "revision_id": revision_id,
+        "source_record_id": provider_id or None,
+        "published_at": item.published_at.isoformat() if item.published_at else None,
+        "available_at": item.available_at.isoformat(),
+        "identity_quality": "provider" if provider_id else "derived",
+        "quality_status": "observed",
+        "schema_version": 1,
+        "payload": payload,
+    }
+
+
+def _calendar_revision_record(event: CalendarEvent) -> dict[str, Any] | None:
+    if not event.available_at or not event.source.strip():
+        return None
+    event_id = event.event_id.strip()
+    if not event_id:
+        event_id = hashlib.sha256(
+            f"{event.source}|{event.currency}|{event.event_name}|{event.timestamp.isoformat()}".encode("utf-8")
+        ).hexdigest()[:32]
+    revision_id = event.revision_id or hashlib.sha256(
+        json.dumps(
+            {"event_id": event_id, "impact": event.impact, "forecast": event.forecast,
+             "previous": event.previous, "actual": event.actual},
+            sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:32]
+    payload = {
+        "event_name": event.event_name,
+        "currency": event.currency,
+        "impact": event.impact,
+        "forecast": event.forecast,
+        "previous": event.previous,
+        "actual": event.actual,
+        "source": event.source,
+    }
+    return {
+        "dataset": "economic",
+        "provider": event.source,
+        "entity_id": event_id,
+        "revision_id": revision_id,
+        "source_record_id": event.event_id or None,
+        "event_time": event.timestamp.isoformat(),
+        "available_at": event.available_at.isoformat(),
+        "currency": event.currency,
+        "identity_quality": "provider" if event.event_id else "derived",
+        "quality_status": "observed",
+        "schema_version": 1,
+        "payload": payload,
+    }
+
+
+def _queue_source_revision(record: dict[str, Any] | None) -> None:
+    if not record:
+        return
+    key = (record["dataset"], record["provider"], record["entity_id"], record["revision_id"])
+    _pending_source_revisions.setdefault(key, record)
+
+
+async def _flush_source_revision_queue() -> None:
+    if not SOURCE_ARCHIVE_ENABLED or not _pending_source_revisions:
+        return
+    snapshot = list(_pending_source_revisions.items())
+    try:
+        await submit_source_revisions(
+            [record for _, record in snapshot], caller_service="nexus-news",
+        )
+    except Exception as exc:
+        log.warning("source_revision_archive_retry_pending", count=len(snapshot), error=str(exc))
+        return
+    for key, _ in snapshot:
+        _pending_source_revisions.pop(key, None)
+
+
 async def _news_poll_loop() -> None:
     global _latest_news  # noqa: PLW0603
     log.info("news_poll_started", interval_sec=NEWS_POLL_SEC)
+    seeded_pending = False
 
     while True:
         try:
+            if SOURCE_ARCHIVE_ENABLED and not seeded_pending:
+                for cached_item in _latest_news:
+                    _queue_source_revision(_news_revision_record(cached_item))
+                seeded_pending = True
             if _fetcher:
                 items = await _fetcher.fetch_all(DEFAULT_SYMBOLS)
                 if items:
@@ -369,11 +483,15 @@ async def _news_poll_loop() -> None:
                     )
                     await _publish_high_impact_news(items)
                     await _write_news_cache(_latest_news)
+                    if SOURCE_ARCHIVE_ENABLED:
+                        for item in items:
+                            _queue_source_revision(_news_revision_record(item))
                     log.info(
                         "news_poll_ok",
                         fetched=len(items),
                         total=len(_latest_news),
                     )
+            await _flush_source_revision_queue()
         except asyncio.CancelledError:
             break
         except Exception as exc:
@@ -440,7 +558,11 @@ async def _calendar_poll_loop() -> None:
                     _latest_calendar = sorted(
                         events, key=lambda e: e.timestamp,
                     )
+                    if SOURCE_ARCHIVE_ENABLED:
+                        for event in events:
+                            _queue_source_revision(_calendar_revision_record(event))
                     log.info("calendar_poll_ok", count=len(events))
+            await _flush_source_revision_queue()
         except asyncio.CancelledError:
             break
         except Exception as exc:

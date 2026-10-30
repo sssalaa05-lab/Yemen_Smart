@@ -251,9 +251,12 @@ class PerformanceMetrics(BaseModel):
 class NewsItem(BaseModel):
     id: str = ""  # stable hash id — used by the dashboard as React key
     revision_id: str = ""
+    source_record_id: str | None = None
     headline: str
     source: str = ""
+    provider: str = ""  # aggregator/feed identity; source remains the publisher label
     timestamp: datetime = Field(default_factory=_utcnow)
+    published_at: datetime | None = None  # provider publication time, not event time
     available_at: datetime | None = None  # first observed by this system; not provider publication time
     impact: str = "low"
     sentiment: str = "neutral"

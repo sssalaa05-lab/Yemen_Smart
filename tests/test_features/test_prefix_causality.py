@@ -63,3 +63,51 @@ def test_indicator_session_and_volatility_outputs_are_prefix_causal() -> None:
         expected_vol = full_volatility.iloc[end - 1, :4].to_numpy(dtype=float)
         np.testing.assert_allclose(actual_vol, expected_vol, rtol=1e-10, atol=1e-10, equal_nan=True)
         assert str(detect_regime(prefix_bars).iloc[-1]) == str(full_volatility.iloc[end - 1]["regime"])
+
+
+def test_future_suffix_perturbations_do_not_change_past_feature_rows() -> None:
+    bars = _bars()
+    baseline = tag_dataframe(calculate_all(bars.copy()))
+    numeric = [
+        column for column in baseline.columns
+        if column not in bars.columns and pd.api.types.is_numeric_dtype(baseline[column])
+    ]
+    baseline_vol = {
+        "atr": calculate_atr_normalized(bars),
+        "bb": calculate_bb_width(bars),
+        "hv": calculate_historical_vol(bars),
+        "percentile": calculate_vol_percentile(bars),
+        "regime": detect_regime(bars).astype(str),
+    }
+
+    for cutoff in (210, 225, 239):
+        changed = bars.copy()
+        suffix = np.arange(len(changed) - cutoff, dtype=float)
+        changed.loc[cutoff:, "open"] = 10_000.0 + suffix
+        changed.loc[cutoff:, "high"] = 10_010.0 + suffix
+        changed.loc[cutoff:, "low"] = 9_990.0 + suffix
+        changed.loc[cutoff:, "close"] = 10_000.0 + suffix
+        changed.loc[cutoff:, "volume"] = 1_000_000.0 + suffix
+
+        altered_features = tag_dataframe(calculate_all(changed))
+        target = cutoff - 1
+        np.testing.assert_allclose(
+            altered_features.iloc[target][numeric].to_numpy(dtype=float),
+            baseline.iloc[target][numeric].to_numpy(dtype=float),
+            rtol=1e-10, atol=1e-10, equal_nan=True,
+            err_msg=f"future suffix changed numeric features at row {target}",
+        )
+        assert altered_features.iloc[target]["session"] == baseline.iloc[target]["session"]
+
+        for key, fn in (
+            ("atr", calculate_atr_normalized),
+            ("bb", calculate_bb_width),
+            ("hv", calculate_historical_vol),
+            ("percentile", calculate_vol_percentile),
+        ):
+            np.testing.assert_allclose(
+                fn(changed).iloc[target], baseline_vol[key].iloc[target],
+                rtol=1e-10, atol=1e-10, equal_nan=True,
+                err_msg=f"future suffix changed {key} at row {target}",
+            )
+        assert str(detect_regime(changed).iloc[target]) == baseline_vol["regime"].iloc[target]

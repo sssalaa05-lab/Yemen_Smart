@@ -36,7 +36,7 @@
 
 - [x] عدم إنشاء label عند غياب timestamp/close مستقبلي مجاور أو عند تعادل السعر؛ عدم قبول bar غير مغلق للتدريب.
 
-- [ ] توسعت اختبارات causal لتشمل مؤشرات/جلسات/تقلب بطول 240 شمعة، MTF مغلق حسب as-of، تأكيد swing وS/R/OB levels، cross-asset والمؤشرات المؤسسية؛ يلزم استكمال الاختبارات ذات السلسلة التاريخية الفعلية ومسارات المخاطر/الـfeatures الأخرى وتشغيل pytest. أضيفت available_at/revision IDs للأخبار وتقويم الخدمة وPIT eligibility gate للميزات الخارجية؛ ما زال الأرشيف append-only الدائم وتحميل vintages التاريخية لـnews/المصادر غير التقويمية مطلوبًا.
+- [ ] اختبارات causal الحالية تشمل المؤشرات/الجلسات/التقلب بطول 240 شمعة، MTF مغلق حسب as-of، swing وS/R/OB levels، cross-asset، المؤسسية، suffix perturbation، وقرار المخاطر التاريخي. `pytest -q` الكامل ينجح حاليًا: 273 passed و4 subtests؛ يلزم استكمال كل feature/risk path واختبار سلاسل تاريخية فعلية. أُضيف append-only source_revisions وكتّاب forward capture للأخبار/التقويم/DXY/US10Y مع PIT query والبوابة؛ ما زالت vintages/backfill التاريخية، مصادر الأساسيات، طابور durable عبر restart، وربط loader المؤرخ فعليًا بتدريب ML مطلوبة.
 
 - [x] إضافة purge عام يعتمد target_timestamp الفعلي مع gap اختياري؛ الهدف الحالي أفقه شمعة مجاورة واحدة.
 

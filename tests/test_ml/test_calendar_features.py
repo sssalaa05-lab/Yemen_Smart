@@ -187,7 +187,7 @@ class TestPointInTimeWindows:
 
     def test_no_leakage_future_event_not_surprise(self):
         # Event 10 min in the FUTURE must not feed surprise / high_last90…
-        events = prepare_events([_ev("2026-10-27T12:10:00Z", actual="5.0", forecast="0.5")])
+        events = prepare_events([_ev("2026-10-27T12:10:00Z", forecast="0.5")])
         feats = compute_calendar_features("XAUUSD", self.ts, events)
         assert feats["cal_surprise_signed"] == 0.0
         assert feats["cal_high_last90"] == 0.0
@@ -225,12 +225,17 @@ class TestPointInTimeWindows:
         assert compute_calendar_features("XAUUSD", self.ts, low)["cal_surprise_signed"] == 0.0
 
     def test_count_next24h_multiple(self):
-        events = prepare_events([
+        raw_events = [
             _ev("2026-10-27T13:00:00Z", name="A"),
             _ev("2026-10-27T15:00:00Z", name="B"),
             _ev("2026-10-27T20:00:00Z", name="C"),
             _ev("2026-10-27T15:00:00Z", currency="EUR", name="D"),  # not USD
-        ])
+        ]
+        # All four scheduled records were captured before the decision time;
+        # future publication timestamps do not imply future availability.
+        for event in raw_events:
+            event["available_at"] = "2026-10-27T10:00:00Z"
+        events = prepare_events(raw_events)
         feats = compute_calendar_features("XAUUSD", self.ts, events)
         assert feats["cal_high_count_next24h"] == 3.0
         assert feats["cal_min_to_next_high"] == pytest.approx(60.0)
@@ -313,5 +318,6 @@ class TestEnrichment:
         correction["available_at"] = "2026-10-27T11:30:00Z"
         correction["revision_id"] = "same-event:v2"
         events = prepare_events([first, correction])
-        features = compute_calendar_features("XAUUSD", self.ts, events)
+        decision_time = datetime(2026, 10, 27, 12, 0, tzinfo=UTC)
+        features = compute_calendar_features("XAUUSD", decision_time, events)
         assert features["cal_high_count_next24h"] == 1.0

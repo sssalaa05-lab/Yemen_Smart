@@ -38,6 +38,21 @@ _HARDCODED_MIN: dict[str, float | int] = {
 _AGGRESSIVE_TRADING = os.getenv("NEXUS_AGGRESSIVE_TRADING", "false").lower() == "true"
 
 
+def _coerce_decision_time(value: datetime | str | None) -> datetime | None:
+    if value is None:
+        return datetime.now(timezone.utc)
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 @dataclass
 class RuleViolation:
     rule: str
@@ -180,6 +195,7 @@ class RulesEngine:
         avg_spread = current_state.get("avg_spread", 1.0)
         expected_price = current_state.get("expected_price", trade_proposal.entry)
         actual_price = current_state.get("actual_price", trade_proposal.entry)
+        decision_time = current_state.get("decision_time")
 
         v = self.check_max_risk_per_trade(
             trade_proposal.conviction, trade_proposal.entry, trade_proposal.sl, balance,
@@ -207,7 +223,7 @@ class RulesEngine:
         if v:
             violations.append(v)
 
-        v = self.check_news_blackout()
+        v = self.check_news_blackout(decision_time)
         if v:
             violations.append(v)
 
@@ -215,7 +231,7 @@ class RulesEngine:
         if v:
             violations.append(v)
 
-        v = self.check_friday_close()
+        v = self.check_friday_close(decision_time)
         if v:
             violations.append(v)
 
@@ -338,10 +354,17 @@ class RulesEngine:
             )
         return None
 
-    def check_news_blackout(self) -> RuleViolation | None:
+    def check_news_blackout(
+        self, decision_time: datetime | str | None = None,
+    ) -> RuleViolation | None:
         if self._cfg.news_blackout_minutes <= 0:
             return None
-        now = datetime.now(timezone.utc)
+        now = _coerce_decision_time(decision_time)
+        if now is None:
+            return RuleViolation(
+                rule="invalid_decision_time",
+                message="News blackout requires a valid decision timestamp",
+            )
         for event in self._upcoming_news:
             event_time = event.get("timestamp")
             if event_time is None:
@@ -387,10 +410,17 @@ class RulesEngine:
             )
         return None
 
-    def check_friday_close(self) -> RuleViolation | None:
+    def check_friday_close(
+        self, decision_time: datetime | str | None = None,
+    ) -> RuleViolation | None:
         if _AGGRESSIVE_TRADING:
             return None
-        now = datetime.now(timezone.utc)
+        now = _coerce_decision_time(decision_time)
+        if now is None:
+            return RuleViolation(
+                rule="invalid_decision_time",
+                message="Friday-close rule requires a valid decision timestamp",
+            )
         if now.weekday() == 4 and now.hour >= self._cfg.friday_close_utc_hour:
             return RuleViolation(
                 rule="friday_close",

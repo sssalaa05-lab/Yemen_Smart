@@ -104,6 +104,7 @@ services:
       <<: *common-env
       NEXUS_SERVICE_NAME: nexus-data
       NEXUS_SERVICE_PORT: "8001"
+      NEXUS_INTERNAL_SERVICE_TOKEN: ${NEXUS_INTERNAL_SERVICE_TOKEN:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -131,6 +132,8 @@ services:
       <<: *common-env
       NEXUS_SERVICE_NAME: nexus-features
       NEXUS_SERVICE_PORT: "8002"
+      NEXUS_INTERNAL_SERVICE_TOKEN: ${NEXUS_INTERNAL_SERVICE_TOKEN:-}
+      NEXUS_DATA_URL: http://nexus-data:8001
     depends_on:
       nexus-data:
         condition: service_healthy
@@ -158,8 +161,12 @@ services:
       <<: *common-env
       NEXUS_SERVICE_NAME: nexus-news
       NEXUS_SERVICE_PORT: "8005"
+      NEXUS_INTERNAL_SERVICE_TOKEN: ${NEXUS_INTERNAL_SERVICE_TOKEN:-}
+      NEXUS_DATA_URL: http://nexus-data:8001
     depends_on:
       redis:
+        condition: service_healthy
+      nexus-data:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8005/health"]

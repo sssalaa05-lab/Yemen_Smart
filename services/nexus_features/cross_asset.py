@@ -20,6 +20,7 @@ Data sources (tried in order):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -28,6 +29,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
+
+from shared.source_revision_client import submit_source_revisions
 
 logger = logging.getLogger(__name__)
 
@@ -486,6 +489,7 @@ async def shift_monitor_loop(redis_client, check_interval_sec: int = 300) -> Non
 async def cross_asset_refresh_loop(redis_client, interval_sec: int = 300) -> None:
     """Refresh DXY and US10Y every `interval_sec` seconds."""
     logger.info("cross_asset: refresh loop started (interval=%ds)", interval_sec)
+    pending: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     while True:
         try:
             await asyncio.sleep(interval_sec)
@@ -494,8 +498,68 @@ async def cross_asset_refresh_loop(redis_client, interval_sec: int = 300) -> Non
             await redis_client.delete(_CROSS_ASSET_KEY.format(symbol="US10Y"))
             # Compute and cache a fresh summary (symbol-agnostic, no gold closes here)
             await compute_cross_asset_features("XAUUSD", redis_client)
+            if len(os.getenv("NEXUS_INTERNAL_SERVICE_TOKEN", "").strip()) >= 32:
+                for symbol in ("DXY", "US10Y"):
+                    raw = await redis_client.get(_CROSS_ASSET_KEY.format(symbol=symbol))
+                    if not raw:
+                        continue
+                    record = _source_revision_record(symbol, json.loads(raw))
+                    if record:
+                        key = (record["dataset"], record["provider"], record["entity_id"], record["revision_id"])
+                        pending.setdefault(key, record)
+                if pending:
+                    snapshot = list(pending.items())
+                    try:
+                        await submit_source_revisions(
+                            [record for _, record in snapshot], caller_service="nexus-features",
+                        )
+                    except Exception:
+                        logger.warning("cross_asset: source archive failed; revisions retained for retry", exc_info=True)
+                    else:
+                        for key, _ in snapshot:
+                            pending.pop(key, None)
             logger.debug("cross_asset: refreshed DXY/US10Y")
         except asyncio.CancelledError:
             break
         except Exception:
             logger.warning("cross_asset: refresh error", exc_info=True)
+
+
+def _source_revision_record(symbol: str, snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    """Create a PIT record only for externally observed snapshots, never proxies."""
+    source = str(snapshot.get("source") or "").strip()
+    if not source or source.lower() in {"fallback", "dynamic_gold_proxy", "synthetic", "unavailable_asof"}:
+        return None
+    available_at = snapshot.get("available_at") or snapshot.get("fetched_at")
+    if not isinstance(available_at, str) or not available_at.strip():
+        return None
+    try:
+        available = datetime.fromisoformat(available_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if available.tzinfo is None:
+        return None
+    payload = {
+        key: value for key, value in snapshot.items()
+        if key not in {"fetched_at", "available_at", "revision_id", "source_record_id"}
+    }
+    payload["source"] = source
+    payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    event_time = snapshot.get("event_time")
+    revision_id = str(snapshot.get("revision_id") or hashlib.sha256(
+        f"{symbol}|{event_time or ''}|{payload_json}".encode("utf-8")
+    ).hexdigest()[:32])
+    source_record_id = str(snapshot.get("source_record_id") or "").strip() or None
+    return {
+        "dataset": "cross_asset",
+        "provider": source,
+        "entity_id": symbol,
+        "revision_id": revision_id,
+        "source_record_id": source_record_id,
+        "event_time": event_time,
+        "available_at": available.isoformat(),
+        "identity_quality": "provider" if source_record_id else "derived",
+        "quality_status": "observed",
+        "schema_version": 1,
+        "payload": payload,
+    }

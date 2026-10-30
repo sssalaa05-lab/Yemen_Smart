@@ -7,6 +7,7 @@ Includes automatic data-retention pruning.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import threading
@@ -198,6 +199,33 @@ class DataStore:
                 source VARCHAR NOT NULL,
                 event_json JSON NOT NULL,
                 PRIMARY KEY (event_id, revision_id)
+            )
+        """)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS source_revisions (
+                dataset VARCHAR NOT NULL,
+                provider VARCHAR NOT NULL,
+                entity_id VARCHAR NOT NULL,
+                revision_id VARCHAR NOT NULL,
+                source_record_id VARCHAR,
+                event_time TIMESTAMP WITH TIME ZONE,
+                period_start TIMESTAMP WITH TIME ZONE,
+                period_end TIMESTAMP WITH TIME ZONE,
+                published_at TIMESTAMP WITH TIME ZONE,
+                available_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                received_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                caller_service VARCHAR NOT NULL,
+                identity_quality VARCHAR NOT NULL,
+                quality_status VARCHAR NOT NULL,
+                unit VARCHAR,
+                currency VARCHAR,
+                region VARCHAR,
+                schema_version INTEGER NOT NULL,
+                ingest_run_id VARCHAR,
+                supersedes_revision_id VARCHAR,
+                payload_hash VARCHAR NOT NULL,
+                payload JSON NOT NULL,
+                PRIMARY KEY (dataset, provider, entity_id, revision_id)
             )
         """)
         self._conn.execute("""
@@ -531,6 +559,156 @@ class DataStore:
                     raise
 
         return await loop.run_in_executor(_POOL, _job)
+
+    async def persist_source_revisions(
+        self, records: list[dict[str, Any]], *, caller_service: str,
+    ) -> int:
+        """Atomically append point-in-time source vintages; never rewrite a revision."""
+        if not records:
+            return 0
+        allowed_datasets = {"news", "economic", "fundamental", "cross_asset"}
+
+        def _time(value: Any, field: str, *, required: bool = False) -> datetime | None:
+            if value is None or value == "":
+                if required:
+                    raise ValueError(f"{field} is required")
+                return None
+            if isinstance(value, datetime):
+                parsed = value
+            elif isinstance(value, str):
+                try:
+                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except ValueError as exc:
+                    raise ValueError(f"invalid {field}") from exc
+            else:
+                raise ValueError(f"invalid {field}")
+            if parsed.tzinfo is None:
+                raise ValueError(f"{field} must include a timezone")
+            return parsed.astimezone(timezone.utc)
+
+        normalized: list[tuple[Any, ...]] = []
+        seen: dict[tuple[str, str, str, str], str] = {}
+        received_at = datetime.now(timezone.utc)
+        caller = str(caller_service or "").strip()[:64]
+        if not caller:
+            raise ValueError("caller_service is required")
+        for record in records:
+            if not isinstance(record, dict):
+                raise ValueError("each source revision must be an object")
+            dataset = str(record.get("dataset") or "").strip().lower()
+            provider = str(record.get("provider") or "").strip()[:200]
+            entity_id = str(record.get("entity_id") or "").strip()[:512]
+            revision_id = str(record.get("revision_id") or "").strip()[:256]
+            if dataset not in allowed_datasets or not all((provider, entity_id, revision_id)):
+                raise ValueError("unsupported dataset or missing source identity")
+            payload = record.get("payload")
+            if not isinstance(payload, (dict, list)):
+                raise ValueError("payload must be an object or array")
+            payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            if len(payload_json.encode("utf-8")) > 262_144:
+                raise ValueError("source revision payload exceeds 256 KiB")
+            payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+            key = (dataset, provider, entity_id, revision_id)
+            prior_hash = seen.get(key)
+            if prior_hash is not None and prior_hash != payload_hash:
+                raise ValueError("revision identity reused with conflicting payloads")
+            if prior_hash is not None:
+                continue
+            seen[key] = payload_hash
+            normalized.append((
+                dataset, provider, entity_id, revision_id,
+                str(record.get("source_record_id") or "")[:512] or None,
+                _time(record.get("event_time"), "event_time"),
+                _time(record.get("period_start"), "period_start"),
+                _time(record.get("period_end"), "period_end"),
+                _time(record.get("published_at"), "published_at"),
+                _time(record.get("available_at"), "available_at", required=True),
+                received_at, caller,
+                str(record.get("identity_quality") or "derived")[:32],
+                str(record.get("quality_status") or "observed")[:32],
+                str(record.get("unit") or "")[:64] or None,
+                str(record.get("currency") or "")[:16] or None,
+                str(record.get("region") or "")[:32] or None,
+                int(record.get("schema_version") or 1),
+                str(record.get("ingest_run_id") or "")[:128] or None,
+                str(record.get("supersedes_revision_id") or "")[:256] or None,
+                payload_hash, payload_json,
+            ))
+
+        loop = asyncio.get_running_loop()
+
+        def _job() -> int:
+            assert self._conn is not None
+            with self._lock:
+                conn = self._conn
+                conn.execute("BEGIN TRANSACTION")
+                inserted = 0
+                try:
+                    for row in normalized:
+                        key = row[:4]
+                        existing = conn.execute(
+                            "SELECT payload_hash FROM source_revisions "
+                            "WHERE dataset=? AND provider=? AND entity_id=? AND revision_id=?",
+                            key,
+                        ).fetchone()
+                        if existing:
+                            if existing[0] != row[-2]:
+                                raise ValueError("revision identity conflicts with stored payload")
+                            continue
+                        conn.execute(
+                            "INSERT INTO source_revisions (dataset, provider, entity_id, revision_id, "
+                            "source_record_id, event_time, period_start, period_end, published_at, available_at, "
+                            "received_at, caller_service, identity_quality, quality_status, unit, currency, region, "
+                            "schema_version, ingest_run_id, supersedes_revision_id, payload_hash, payload) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            row,
+                        )
+                        inserted += 1
+                    conn.execute("COMMIT")
+                    return inserted
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+
+        return await loop.run_in_executor(_POOL, _job)
+
+    async def query_source_revisions_asof(
+        self, dataset: str, decision_time: datetime, *, provider: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return latest available revision per provider/entity at decision_time."""
+        if decision_time.tzinfo is None:
+            raise ValueError("decision_time must include a timezone")
+        query = """
+            SELECT dataset, provider, entity_id, revision_id, source_record_id, event_time,
+                   period_start, period_end, published_at, available_at, received_at, caller_service,
+                   identity_quality, quality_status, unit, currency, region, schema_version, ingest_run_id,
+                   supersedes_revision_id, payload_hash, payload
+            FROM (
+                SELECT *, row_number() OVER (
+                    PARTITION BY provider, entity_id
+                    ORDER BY available_at DESC, received_at DESC, revision_id DESC
+                ) AS rn
+                FROM source_revisions WHERE dataset=? AND available_at<=?
+            ) ranked WHERE rn=1
+        """
+        params: tuple[Any, ...] = (dataset, decision_time.astimezone(timezone.utc))
+        if provider:
+            query = query.replace("WHERE rn=1", "WHERE rn=1 AND provider=?")
+            params += (provider,)
+        rows = await self._fetch(query, params)
+        columns = [
+            "dataset", "provider", "entity_id", "revision_id", "source_record_id", "event_time",
+            "period_start", "period_end", "published_at", "available_at", "received_at", "caller_service",
+            "identity_quality", "quality_status", "unit", "currency", "region", "schema_version",
+            "ingest_run_id", "supersedes_revision_id", "payload_hash", "payload",
+        ]
+        result = []
+        for row in rows:
+            item = dict(zip(columns, row))
+            if isinstance(item["payload"], str):
+                item["payload"] = json.loads(item["payload"])
+            result.append(item)
+        return result
 
     async def dedupe_ohlcv(self) -> int:
         """Remove duplicate (symbol, timeframe, timestamp) rows; return removed count."""

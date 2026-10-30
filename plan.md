@@ -2,13 +2,13 @@
 
 > هذه الخطة محدثة بعد دمج تقرير المستخدم مع دراسات MQL5 وجودة التدريب المرفقة. هي خطة عمل، لا تصريحًا بأن كل البنود نُفذت. العبارة عن عدم تعديل الكود تصف وقت إعداد النسخة الأولى فقط؛ انظر ملخص التنفيذ المحلي أدناه.
 
-## حالة التنفيذ المحلي — 28 أكتوبر 2026
+## حالة التنفيذ المحلي — 30 أكتوبر 2026
 
-- **منفذ محليًا:** UTC وbar closure في bridge؛ copy_ticks_range batches مع watermark/recovery؛ lineage ثابتة بحسب provider/broker/server/raw symbol مع alias منفصل وcontract snapshots مؤرخة؛ حفظ دفعات ticks/bars وحقول lineage في DuckDB.
-- **منفذ محليًا:** label آمن للشمعة المجاورة، تنقية features، receipts للنموذج، purge حسب target timestamps؛ point-in-time filtering وrevision receipts لتقويم MT5؛ مدخلات `available_at`/revision IDs للأخبار وتقويم خدمة الأخبار؛ تدريب ML يرفض ميزات الأخبار/الماكرو/الأصول الخارجية بلا receipt صالح.
-- **منفذ محليًا:** closed-bar gate في feature service وMTF as-of aggregation؛ تحديد `confirmation_index/confirmed_at` للـswing points وorder blocks؛ اختبارات snapshots للـMTF والـlevels والـcross-asset والمؤسسية.
-- **التحقق:** compileall وdiff check، 13 اختبار training-data، 8 اختبارات feature causality و5 اختبارات news/calendar metadata نجحت بالتشغيل المباشر. لم تتوفر pytest؛ بعض ميزات institutional تستخدم graceful defaults لغياب optional packages. لا اختبار MT5 حي/Demo أو ادعاء اكتمال ticks.
-- **ما زال مفتوحًا:** مصدر تدريب مستقل لتاريخ CSV، اختبار causal عبر جميع المسارات كـper-time-series وليس فقط snapshots، أرشيف append-only لنسخ news/calendar service والمصادر الاقتصادية الأخرى، اختبار E2E والجسر، صلاحيات API، واستكمال جرد الواجهات والعلاقات.
+- **منفذ محليًا:** UTC وbar closure في bridge؛ جلب `copy_ticks_range` بدفعات مع watermark/recovery؛ lineage مستقلة عن alias بحسب provider/broker/server/raw symbol ومواصفات عقد مؤرخة؛ حفظ دفعات ticks/bars وحقول lineage في DuckDB.
+- **منفذ محليًا:** label آمن للشمعة المجاورة، تنقية features، receipts للنموذج، purge حسب target timestamps؛ PIT revisions لتقويم MT5 وحقول provider/published/available للأخبار؛ جدول append-only عام وكتّاب forward capture للأخبار/التقويم/DXY/US10Y عبر endpoint داخلي محمي.
+- **منفذ محليًا:** closed-bar gate وMTF as-of؛ confirmation metadata لنقاط swing ومستويات S/R وorder blocks؛ prefix/suffix causality لميزات المؤشرات والجلسات والتقلب، واختبارات cross-asset/institutional وposition sizing وقرار blackout التاريخي.
+- **التحقق:** 91 اختبارًا مستهدفًا نجحت في data/PIT/features/ML/news/risk/backtest (مع 4 subtests)، ثم نجحت suite كاملة: **273 passed، 4 subtests passed، تحذير dependency واحد**. اجتاز `py_compile` و`git diff --check`. لم يُجر اختبار MT5 حي/Demo أو ادعاء اكتمال ticks.
+- **ما زال مفتوحًا:** مدخل تاريخ/CSV مستقل عن Redis؛ backfill تاريخي موثوق للأخبار/الأساسيات؛ طابور revisions دائم عبر restart وربط loader PIT فعليًا بالتدريب؛ توسيع الاختبارات إلى كل feature/risk path وسلاسل تاريخية كاملة؛ E2E والجسر الحي، الصلاحيات، وجرد الواجهات والعلاقات.
 
 ## المبدأ
 
@@ -53,7 +53,7 @@
 
 ## المرحلة 4 — بيانات الأخبار/الاقتصاد/الأساسيات والأصول المرتبطة
 
-- [جزئي] حُفظت revisions لتقويم MT5 في DuckDB مع `available_at`. أُضيفت first-observed وcontent revision IDs إلى NewsItem/CalendarEvent من مصادر الخدمة؛ هذه snapshots المتغيرة لا تزال بلا أرشيف append-only دائم. حقول `fetched_at` أو وقت الجلب وحدها لا تثبت vintage المصدر الخارجي.
+- [منفذ محليًا جزئيًا] حُفظت revisions لتقويم MT5 وتقويم خدمة الأخبار، الأخبار (مع provider منفصل عن publisher وsource_record_id)، ولقطات DXY/US10Y في جدول DuckDB append-only مع endpoint داخلي token-protected. الالتقاط forward-only؛ لا توجد backfill تاريخية شاملة، والـretry queue لا تصمد كلها عبر restart. راجع `docs/PIT_SOURCE_REVISION_ARCHIVE_AR.md` لإعداد السر وحدود completeness والاستخدام. حقول `fetched_at` أو وقت الجلب وحدها لا تثبت vintage تاريخيًا للمصدر.
 - حفظ المصدر والوحدة/العملة والفترة وevent/observation time وpublication/available/received times ونسخ revisions/vintages.
 - فرض point-in-time: لا تستخدم في قرار عند T إلا البيانات التي `available_at <= T`. أُضيف إلى eligibility gate رفض الميزات المسماة news/macro/sentiment/cross-asset عند غياب source/revision/availability receipt؛ يلزم توصيل loader مؤرخ للمصادر غير MT5.
 - وسم بيانات fallback أو الاصطناعي بوضوح أو استبعادها من التدريب؛ لا اعتبار قيم Redis الحالية وحدها أرشيفًا تاريخيًا.

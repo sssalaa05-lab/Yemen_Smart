@@ -24,9 +24,9 @@ class TestDataServiceFiles:
 
 class TestDuckDBStore:
     def test_importable(self):
-        from services.nexus_data.duckdb_store import DuckDBStore  # noqa: F401
+        from services.nexus_data.duckdb_store import DataStore  # noqa: F401
 
 
 class TestRedisCache:
     def test_importable(self):
-        from services.nexus_data.redis_cache import RedisCache  # noqa: F401
+        from services.nexus_data.redis_cache import TickCache  # noqa: F401

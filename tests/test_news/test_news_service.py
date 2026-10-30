@@ -116,3 +116,78 @@ class TestNewsModelValidation:
         merged = _merge_news([old], [incoming], 10)
         assert len(merged) == 1
         assert merged[0].available_at == first
+
+    def test_news_source_record_and_publication_time_are_preserved(self):
+        from datetime import datetime, timezone
+        from shared.models import NewsItem
+
+        published = datetime(2026, 10, 28, 9, tzinfo=timezone.utc)
+        observed = datetime(2026, 10, 28, 9, 2, tzinfo=timezone.utc)
+        item = NewsItem(
+            headline="Headline", source="Wire A", source_record_id="https://example.test/story/7",
+            timestamp=published, published_at=published, available_at=observed,
+        )
+        assert item.published_at == published
+        assert item.available_at == observed
+        assert item.source_record_id.endswith("/7")
+
+    def test_identical_headlines_from_different_providers_keep_distinct_lineage(self):
+        from datetime import datetime, timezone
+        from services.nexus_news.main import _merge_news
+        from services.nexus_news.news_fetcher import NewsFetcher, _news_revision_id
+        from shared.models import NewsItem
+
+        published = datetime(2026, 10, 28, 9, tzinfo=timezone.utc)
+        observed = datetime(2026, 10, 28, 9, 1, tzinfo=timezone.utc)
+        items = [
+            NewsItem(headline="Same headline", source="Reuters", provider=provider,
+                     timestamp=published,
+                     published_at=published, available_at=observed,
+                     revision_id=_news_revision_id(provider, "Same headline", published))
+            for provider in ("newsapi", "gnews")
+        ]
+        fetcher = NewsFetcher()
+        assert len(fetcher._deduplicate(items)) == 2
+        assert len(_merge_news([], items, 10)) == 2
+
+    def test_news_archive_record_fails_closed_without_observed_at(self):
+        from services.nexus_news.main import _news_revision_record
+        from shared.models import NewsItem
+
+        assert _news_revision_record(NewsItem(headline="No observation proof")) is None
+
+    def test_news_and_calendar_archive_records_keep_distinct_time_axes(self):
+        from datetime import datetime, timezone
+        from services.nexus_news.main import _calendar_revision_record, _news_revision_record
+        from shared.models import CalendarEvent, NewsItem
+
+        published = datetime(2026, 10, 28, 9, tzinfo=timezone.utc)
+        observed = datetime(2026, 10, 28, 9, 2, tzinfo=timezone.utc)
+        news = _news_revision_record(NewsItem(
+            headline="Headline", source="Wire A", source_record_id="https://example.test/1",
+            revision_id="rev-news", timestamp=published, published_at=published,
+            available_at=observed,
+        ))
+        assert news is not None
+        assert news["published_at"] == published.isoformat()
+        assert news["available_at"] == observed.isoformat()
+        assert "timestamp" not in news["payload"]
+
+        scheduled = datetime(2026, 10, 28, 12, tzinfo=timezone.utc)
+        event = _calendar_revision_record(CalendarEvent(
+            event_name="CPI", currency="USD", source="ForexFactory",
+            event_id="event-7", revision_id="rev-economic",
+            timestamp=scheduled, available_at=observed,
+        ))
+        assert event is not None
+        assert event["event_time"] == scheduled.isoformat()
+        assert event["available_at"] == observed.isoformat()
+
+    def test_missing_publisher_time_is_not_fabricated_for_pit(self):
+        from services.nexus_news.news_fetcher import _news_revision_id, _parse_iso_optional, _parse_rss_date_optional
+
+        assert _parse_iso_optional(None) is None
+        assert _parse_iso_optional("not-a-provider-time") is None
+        assert _parse_rss_date_optional(None) is None
+        assert _parse_rss_date_optional("not-a-provider-time") is None
+        assert _news_revision_id("Wire", "headline", None) == _news_revision_id("Wire", "headline", None)

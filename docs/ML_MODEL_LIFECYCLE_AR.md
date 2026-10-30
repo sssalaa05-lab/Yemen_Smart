@@ -15,3 +15,9 @@
 ## سجل التقويم وإتاحته الزمنية
 
 نسخ التقويم الواردة تُحفظ append-only في جدول DuckDB `calendar_revisions` مع `event_time` و`available_at` و`revision_id` وpayload المصدر. ميزات التقويم لا تستخدم حدثًا أو revision إذا كان `available_at` أحدث من وقت القرار، وتختار أحدث revision متاح لكل event. إذا غابت `available_at`، تُهمل النسخة بدل افتراض توافرها عند وقت الحدث. هذه الآلية تمنع إعادة استخدام snapshot حديث في الماضي، لكنها لا تعوض مصدرًا لا يسجل فعلًا وقت النشر أو تاريخ revisions الأصلي.
+
+## تحديث محلي — 30 أكتوبر 2026
+
+أُضيف جدول DuckDB عام append-only للنسخ المؤرخة، وبدأت خدمات الأخبار/التقويم والأصول المرتبطة forward capture عند تهيئة `NEXUS_INTERNAL_SERVICE_TOKEN`. تشمل المراجعة هوية provider/record ID وأوقات `published_at`, `event_time`, `available_at` ووقت الاستلام المنفصل. هذا لا يغير قيد مصدر التدريب أعلاه: لا يوجد بعد loader تاريخي يقرأ هذه revisions إلى X حسب `decision_time`؛ لذلك يجب أن تظل الميزات الخارجية غير مؤهلة ما لم يحمل كل سجل training receipt صالحًا ومثبتًا بأن النسخة كانت متاحة عند القرار. لا تُستنتج الإتاحة من آخر قيمة Redis أو من event time.
+
+أُضيف purge عام يستخدم `target_timestamp` الفعلي في طيات walk-forward، واختبارات causal للـprefix/suffix والعائلات الزمنية، واختبارات risk blackout وposition sizing. لا تزال مراجعة كل مسارات feature engineering، vintages التاريخية للمصادر، ومقارنة shadow/paper مطلوبة قبل أي ادعاء بالأداء أو أي ترقية إنتاجية. تشغيل مجموعة pytest الموجهة في 30 أكتوبر أعاد 91 نجاحًا و4 subtests؛ ثم نجحت suite كاملة: **273 passed و4 subtests passed مع تحذير dependency واحد**. لم يحدث اختبار MT5 حي/Demo أو ربط history loader بالتدريب. تفاصيل archive والتفعيل في `docs/PIT_SOURCE_REVISION_ARCHIVE_AR.md`.
