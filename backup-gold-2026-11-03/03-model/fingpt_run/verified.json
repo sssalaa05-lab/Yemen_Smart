@@ -1,0 +1,8 @@
+{
+  "date": "2026-11-03 00:33",
+  "pytest": "32 passed in 1.19s",
+  "forex": "Passed: 7/7",
+  "packages_ok": "10 حزمة أساسية (سكربت التحقق الرسمي cloud_test_fingpt.py)",
+  "torch": "2.15.0+cpu",
+  "transformers": "5.22.1"
+}

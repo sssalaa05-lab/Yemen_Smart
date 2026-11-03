@@ -1,0 +1,590 @@
+# Setup Guide: Running FinGPT Locally and on Replit
+
+This guide provides step-by-step instructions for running FinGPT both locally and on Replit, addressing the requirements for different use cases and hardware configurations.
+
+## Table of Contents
+- [Hardware Requirements](#hardware-requirements)
+- [Local Setup](#local-setup)
+- [Replit Setup](#replit-setup)
+- [Quick Start Examples](#quick-start-examples)
+- [Troubleshooting](#troubleshooting)
+
+## Hardware Requirements
+
+### Minimum Requirements (For Inference Only)
+- **CPU**: Any modern multi-core processor
+- **RAM**: 8GB minimum, 16GB recommended
+- **Storage**: 20GB free space
+- **GPU**: Not required for cloud API usage, recommended for local models
+
+### Recommended Requirements (For Training/Fine-tuning)
+- **CPU**: Modern multi-core processor (Intel i7+/AMD Ryzen 7+)
+- **RAM**: 32GB minimum, 64GB recommended
+- **Storage**: 50GB+ free space (SSD recommended)
+- **GPU**: NVIDIA GPU with 12GB+ VRAM (RTX 3090, A100, etc.)
+- **CUDA**: 11.8+ for GPU acceleration
+
+### Cloud GPU Options
+If you don't have a powerful GPU, consider these cloud platforms:
+- **Google Colab**: Free tier with GPU access
+- **Kaggle Kernels**: Free GPU access
+- **RunPod**: Affordable GPU rentals
+- **Vast.ai**: Low-cost GPU marketplace
+- **Lambda Labs**: GPU cloud for ML
+
+## Local Setup
+
+### Prerequisites
+- Python 3.8-3.11 (Python 3.12 may have compatibility issues with some dependencies)
+- Git
+- Virtual environment (recommended)
+
+**Important Notes:**
+- Python 3.11.11 and 3.11.x are fully tested and recommended
+- Python 3.12 may have compatibility issues with some ML dependencies
+- Windows users: Some packages like `bitsandbytes` and `triton` have limited Windows support
+
+### Step 1: Clone the Repository
+```bash
+git clone https://github.com/AI4Finance-Foundation/FinGPT.git
+cd FinGPT
+```
+
+### Step 2: Create Virtual Environment (Recommended)
+```bash
+# Using venv
+python -m venv fingpt_env
+source fingpt_env/bin/activate  # On Windows: fingpt_env\Scripts\activate
+
+# Using conda
+conda create -n fingpt python=3.8
+conda activate fingpt
+```
+
+### Step 3: Install Dependencies
+
+#### Windows-Specific Notes
+For Windows users, follow these additional steps:
+1. Use Python 3.11.x (avoid 3.12 due to known compatibility issues)
+2. Skip `triton` installation (not fully supported on Windows)
+3. `bitsandbytes` has limited Windows support - consider using alternatives for quantization
+4. Install Visual C++ Redistributable if you encounter compilation errors
+
+#### macOS-Specific Notes
+For macOS users (including Apple Silicon M1/M2/M3):
+1. Use Python 3.8-3.11 (Python 3.12 may have compatibility issues)
+2. Install Xcode Command Line Tools: `xcode-select --install`
+3. For Apple Silicon (M1/M2/M3): Install PyTorch with MPS support:
+   ```bash
+   pip install torch torchvision torchaudio
+   ```
+4. Skip `triton` installation (not supported on macOS)
+5. `bitsandbytes` has limited macOS support - consider using MPS (Metal Performance Shaders) for GPU acceleration
+6. For Intel Macs: standard Linux-compatible installations usually work
+7. For Apple Silicon: some packages may need to be installed from source or use Rosetta 2 for compatibility
+
+#### Basic Installation
+```bash
+pip install -r requirements.txt
+pip install -e .
+```
+
+#### For Inference with Local Models
+```bash
+pip install transformers==4.32.0 peft==0.5.0
+pip install sentencepiece accelerate torch
+pip install datasets bitsandbytes
+# Install triton only for NVIDIA GPUs (Linux/Windows)
+pip install triton<2.1.0  # Skip on macOS/M1 or non-NVIDIA systems
+```
+
+**macOS GPU Acceleration**: For Apple Silicon Macs, use MPS (Metal Performance Shaders):
+```python
+import torch
+# Check if MPS is available
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+else:
+    device = torch.device("cpu")
+```
+
+#### For Training/Fine-tuning
+```bash
+pip install transformers==4.32.0 peft==0.5.0
+pip install sentencepiece accelerate torch
+pip install datasets bitsandbytes
+# Install triton only for NVIDIA GPUs (Linux/Windows)
+pip install triton<2.1.0  # Skip on macOS/M1 or non-NVIDIA systems
+pip install deepspeed wandb  # Optional for advanced training
+```
+
+#### For FinGPT-Forecaster
+```bash
+pip install yfinance finnhub-python
+pip install gradio beautifulsoup4 requests
+```
+
+### Step 4: Verify Installation
+```bash
+python -c "import transformers; import torch; print('Transformers:', transformers.__version__); print('PyTorch:', torch.__version__); print('CUDA available:', torch.cuda.is_available())"
+```
+
+## Replit Setup
+
+### Step 1: Create a New Replit
+1. Go to [replit.com](https://replit.com)
+2. Click "Create Repl"
+3. Select "Python" as the template
+4. Name your repl (e.g., "FinGPT")
+
+### Step 2: Import the Repository
+1. In your Replit, click the "Shell" tab
+2. Run the following commands:
+```bash
+git clone https://github.com/AI4Finance-Foundation/FinGPT.git
+mv FinGPT/* .
+mv FinGPT/.* . 2>/dev/null || true
+rmdir FinGPT
+```
+
+### Step 3: Configure Replit for FinGPT
+
+#### Update `.replit` file
+Create or update the `.replit` file:
+```toml
+[run]
+command = "python main.py"
+
+[env]
+PYTHONPATH = "."
+```
+
+#### Update `pyproject.toml` (if needed)
+Ensure your dependencies are listed:
+```toml
+[project]
+name = "fingpt"
+requires-python = ">=3.8"
+dependencies = [
+    "transformers==4.32.0",
+    "peft==0.5.0",
+    "torch",
+    "accelerate",
+    "sentencepiece",
+    "datasets",
+    "bitsandbytes",
+    "numpy",
+    "pandas",
+]
+```
+
+### Step 4: Install Dependencies
+```bash
+pip install -r requirements.txt
+pip install transformers==4.32.0 peft==0.5.0
+pip install sentencepiece accelerate torch
+pip install datasets bitsandbytes
+# Install triton only for NVIDIA GPUs (Linux/Windows)
+pip install triton<2.1.0  # Skip on macOS/M1 or non-NVIDIA systems
+```
+
+### Step 5: Handle GPU on Replit
+Replit offers GPU access on paid plans. To use GPU:
+1. Upgrade to a Replit plan with GPU access
+2. Enable GPU in your Replit settings
+3. The PyTorch installation will automatically detect CUDA
+
+### Step 6: Run FinGPT
+```bash
+# Run a simple inference script
+python -c "from transformers import AutoTokenizer; print('FinGPT ready!')"
+```
+
+## Quick Start Examples
+
+### Example 1: Running Inference with Pre-trained Models
+
+#### Using FinGPT-Sentiment Model (Local)
+
+The released `fingpt-sentiment_llama2-13b_lora` model is a LoRA adapter,
+not a complete base model. You need access to the Llama 2 base model and must
+use the matching 13B base model when loading the adapter. Authenticate with
+Hugging Face first if the base model requests access:
+
+```bash
+pip install huggingface_hub
+huggingface-cli login
+```
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
+import torch
+
+# Load base model
+base_model = AutoModelForCausalLM.from_pretrained(
+    'NousResearch/Llama-2-13b-hf',
+    trust_remote_code=True,
+    device_map="auto",
+    torch_dtype=torch.float16,
+    offload_folder="offload/",
+)
+tokenizer = AutoTokenizer.from_pretrained('NousResearch/Llama-2-13b-hf')
+
+# Load FinGPT model
+model = PeftModel.from_pretrained(
+    base_model,
+    'FinGPT/fingpt-sentiment_llama2-13b_lora',
+    offload_folder="offload/",
+)
+model = model.eval()
+
+def predict_sentiment(text):
+    prompt = (
+        "Instruction: What is the sentiment of this news? "
+        "Please choose an answer from {negative/neutral/positive}.\n"
+        f"Input: {text}\nAnswer: "
+    )
+    inputs = tokenizer(prompt, return_tensors="pt")
+    inputs = {key: value.to(model.device) for key, value in inputs.items()}
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=20,
+            do_sample=False,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+
+    generated_tokens = outputs[0, inputs["input_ids"].shape[1]:]
+    return tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+
+text = "Glaxo's ViiV Healthcare Signs China Manufacturing Deal With Desano"
+print(predict_sentiment(text))
+```
+
+This model predicts the sentiment of financial text; it does not predict a
+stock price. For next-week directional forecasts, use the separate
+[FinGPT-Forecaster](./fingpt/FinGPT_Forecaster/README.md) component and its
+demo. Neither output should be treated as investment advice.
+
+#### macOS with Apple Silicon (M1/M2/M3)
+For Mac users with Apple Silicon, modify the device configuration:
+```python
+import torch
+
+# Use MPS for Apple Silicon, CUDA for NVIDIA GPUs, CPU as fallback
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+else:
+    device = torch.device("cpu")
+
+# Load model with appropriate device
+base_model = AutoModelForCausalLM.from_pretrained(
+    'NousResearch/Llama-2-13b-hf',
+    trust_remote_code=True,
+    torch_dtype=torch.float16,
+    device_map={"": device},  # Use MPS/CUDA/CPU
+)
+```
+
+#### Using Cloud API (No GPU Required)
+```python
+import os
+
+# Set your API key
+os.environ['OPENAI_API_KEY'] = 'your-api-key-here'
+os.environ['FINGPT_LLM_PROVIDER'] = 'openai'
+
+# Use FinGPT with OpenAI
+from fingpt.Forecaster import FinGPTForecaster
+
+forecaster = FinGPTForecaster()
+result = forecaster.predict(ticker="AAPL", date="2024-01-15")
+print(result)
+```
+
+### Example 2: Running FinGPT-Forecaster Demo
+
+#### Local Setup
+```bash
+cd fingpt/FinGPT_Forecaster
+pip install -r requirements.txt
+```
+
+#### Run the demo notebook
+```bash
+jupyter notebook demo.ipynb
+```
+
+Or run the Gradio app:
+```python
+import gradio as gr
+from fingpt.Forecaster import FinGPTForecaster
+
+forecaster = FinGPTForecaster()
+
+def predict(ticker, date, weeks, add_financials):
+    result = forecaster.predict(
+        ticker=ticker, 
+        date=date, 
+        weeks=weeks,
+        add_financials=add_financials
+    )
+    return result
+
+iface = gr.Interface(
+    fn=predict,
+    inputs=[
+        gr.Textbox(label="Ticker Symbol"),
+        gr.Textbox(label="Date (YYYY-MM-DD)"),
+        gr.Slider(1, 12, value=4, label="Number of Weeks"),
+        gr.Checkbox(label="Add Basic Financials")
+    ],
+    outputs="text",
+    title="FinGPT-Forecaster"
+)
+
+iface.launch()
+```
+
+### Example 3: Training with LoRA (Requires GPU)
+
+Use the provided Jupyter notebooks:
+- `FinGPT_Training_LoRA_with_ChatGLM2_6B_for_Beginners.ipynb`
+- `FinGPT_ Training with LoRA and Meta-Llama-3-8B.ipynb`
+
+```bash
+# Start Jupyter
+jupyter notebook
+
+# Open and run the training notebook cell by cell
+```
+
+## Running Different FinGPT Components
+
+### FinGPT-Sentiment Analysis
+```bash
+cd fingpt/FinGPT_Sentiment_Analysis_v3
+# Run benchmark notebooks
+jupyter notebook benchmark/benchmarks.ipynb
+```
+
+### FinGPT-Forecaster
+```bash
+cd fingpt/FinGPT_Forecaster
+# Run demo
+jupyter notebook demo.ipynb
+```
+
+### FinGPT-RAG
+```bash
+cd fingpt/FinGPT_RAG
+# Check the README for specific setup instructions
+```
+
+### FinGPT-Benchmark
+```bash
+cd fingpt/FinGPT_Benchmark
+# Run demo
+jupyter notebook demo.ipynb
+```
+
+## Troubleshooting
+
+### Common Issues and Solutions
+
+#### Issue 1: CUDA Out of Memory
+**Problem**: `RuntimeError: CUDA out of memory`
+
+**Solutions**:
+- Use a smaller model (7B instead of 13B)
+- Enable quantization (8-bit or 4-bit)
+- Reduce batch size
+- Use gradient checkpointing
+```python
+# Enable 8-bit quantization
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    load_in_8bit=True,
+    device_map="auto",
+    offload_folder="offload/"   # required for proper model loading with device_map
+)
+```
+
+#### Issue 2: Import Errors
+**Problem**: `ModuleNotFoundError: No module named 'transformers'`
+
+**Solution**:
+```bash
+pip install transformers==4.32.0 peft==0.5.0
+pip install sentencepiece accelerate torch
+```
+
+#### Issue 3: HuggingFace Authentication
+**Problem**: `OSError: meta-llama/Llama-2-7b-chat-hf is a gated model`
+
+**Solution**:
+1. Go to [HuggingFace Llama 2 page](https://huggingface.co/meta-llama/Llama-2-7b-chat-hf)
+2. Accept the user agreement
+3. Generate an access token in your HuggingFace settings
+4. Login in your terminal:
+```bash
+huggingface-cli login
+```
+
+#### Issue 4: Replit GPU Not Available
+**Problem**: GPU not detected on Replit
+
+**Solution**:
+- Upgrade to a Replit plan with GPU access
+- Enable GPU in Replit settings
+- Use cloud APIs instead of local models
+
+#### Issue 5: Slow Performance on CPU
+**Problem**: Inference is very slow on CPU
+
+**Solutions**:
+- Use cloud APIs (OpenAI, MiniMax) instead of local models
+- Use smaller models
+- Enable CPU optimizations:
+```python
+import torch
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    torch_dtype=torch.float32,
+    device_map="cpu",
+    offload_folder="offload/"   # required for proper model loading with device_map
+)
+```
+
+#### Issue 6: Dependency Conflicts
+**Problem**: Version conflicts between packages
+
+**Solution**:
+```bash
+# Create fresh environment
+python -m venv fresh_env
+source fresh_env/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt --force-reinstall
+```
+
+#### Issue 7: Triton Import Error
+**Problem**: `ImportError: cannot import name 'driver' from 'triton.runtime'`
+
+**Solution**: This occurs when using incompatible triton versions with bitsandbytes on NVIDIA GPU systems.
+```bash
+# For NVIDIA GPU systems (Linux x86_64)
+pip install "bitsandbytes>=0.43.1" "triton<3.0.0"
+# Reinstall both packages if an incompatible version is already installed
+pip install --upgrade --force-reinstall "bitsandbytes>=0.43.1" "triton<3.0.0"
+```
+
+**Note**: Triton is only declared for Linux x86_64 GPU environments. On macOS/M1 systems, skip Triton and use Apple's Metal Performance Shaders (MPS) for GPU acceleration instead.
+
+#### Issue 8: NumPy 2.x Compatibility
+**Problem**: `A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x`
+
+**Solution**: This is a common issue with PyTorch and other ML dependencies that were compiled with NumPy 1.x.
+```bash
+# Downgrade NumPy to 1.x
+pip install "numpy<2"
+```
+
+**Prevention**: The updated requirements.txt now includes `numpy<2` to prevent this issue during installation.
+
+#### Issue 9: macOS MPS Not Available
+**Problem**: MPS (Metal Performance Shaders) not detected on Apple Silicon Macs
+
+**Solution**: Ensure you have the correct PyTorch version with MPS support:
+```bash
+# For Apple Silicon, install PyTorch with MPS support
+pip install torch torchvision torchaudio
+# Verify MPS availability
+python -c "import torch; print('MPS available:', torch.backends.mps.is_available())"
+```
+
+**Note**: MPS is only available on Apple Silicon (M1/M2/M3) Macs running macOS 12.3+. Intel Macs should use CPU mode.
+
+#### Issue 10: macOS Installation Issues
+**Problem**: Package installation failures on macOS due to compilation errors
+
+**Solution**: 
+```bash
+# Install Xcode Command Line Tools
+xcode-select --install
+
+# For packages that require compilation, try using pre-built wheels
+pip install --only-binary :all: <package_name>
+
+# Use Homebrew for system dependencies
+brew install <dependency_name>
+```
+
+#### Issue 11: Slow Training Performance
+**Problem**: Fine-tuning training is extremely slow (e.g., single epoch taking days instead of hours)
+
+**Solution**: Several factors can cause slow training performance:
+
+**1. GPU Configuration Issues:**
+```bash
+# Check if GPU is being utilized
+nvidia-smi  # For NVIDIA GPUs
+# Monitor GPU usage during training
+watch -n 1 nvidia-smi
+```
+
+**2. Memory/Quantization Settings:**
+- Using `load_in_8bit=True` can significantly slow down training
+- Consider using `load_in_4bit=True` (QLoRA) for better performance
+- If GPU memory allows, try without quantization for maximum speed
+
+**3. Batch Size and Gradient Accumulation:**
+```bash
+# Optimize batch size for your GPU
+# Too small = slow, too large = OOM
+--per_device_train_batch_size 16  # Adjust based on GPU
+--gradient_accumulation_steps 1   # Increase if reducing batch size
+```
+
+**4. DeepSpeed Configuration:**
+```bash
+# Without DeepSpeed (faster for smaller models):
+python train_lora.py --base_model llama2-13b-nr --dataset sentiment-train
+
+# With DeepSpeed (better for large models but may have overhead):
+deepspeed -i train_lora.py --base_model llama2-13b-nr --dataset sentiment-train
+```
+
+**5. Expected Performance Benchmarks:**
+- FinGPT v3.3 (13B) on RTX 3090: ~17 hours for full training
+- FinGPT v3.2 (7B) on A100: ~5.5 hours for full training
+- If training is significantly slower than these benchmarks, check the above issues
+
+**6. Other Optimizations:**
+- Use mixed precision training (`--fp16` or `--bf16`)
+- Enable gradient checkpointing (`--gradient_checkpointing`)
+- Reduce sequence length if appropriate for your task
+- Use optimized data loaders and preprocessing
+
+### Getting Help
+
+If you encounter issues not covered here:
+1. Check the [GitHub Issues](https://github.com/AI4Finance-Foundation/FinGPT/issues)
+2. Join the [Discord community](https://discord.gg/trsr8SXpW5)
+3. Refer to specific component READMEs in the `fingpt/` directory
+4. Check the [FinGPT documentation](https://ai4finance.org/research/fingpt-open-source-finllm.html)
+
+## Additional Resources
+
+- [FinGPT Research Paper](https://arxiv.org/abs/2306.06031)
+- [HuggingFace Models](https://huggingface.co/FinGPT)
+- [FinGPT Demos](https://huggingface.co/spaces/FinGPT)
+- [Medium Blog Series](https://medium.datadriveninvestor.com/fingpt-powering-the-future-of-finance-with-20-cutting-edge-applications-7c4d082ad3d8)
+
+## Disclaimer
+
+Nothing herein is financial advice, and NOT a recommendation to trade real money. Please use common sense and always first consult a professional before trading or investing.

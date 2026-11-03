@@ -1,0 +1,699 @@
+     1→     1→'use client'
+     2→     2→
+     3→     3→import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+     4→     4→import dynamic from 'next/dynamic'
+     5→     5→import { motion } from 'motion/react'
+     6→     6→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+     7→     7→import { Badge } from '@/components/ui/badge'
+     8→     8→import { Button } from '@/components/ui/button'
+     9→     9→import { Separator } from '@/components/ui/separator'
+    10→    10→import { Textarea } from '@/components/ui/textarea'
+    11→    11→import { CountUp } from '@/components/gold/CountUp'
+    12→    12→import CommandPalette, { type PaletteAction } from '@/components/gold/CommandPalette'
+    13→    13→import type { Candle } from '@/components/gold/PriceChart'
+    14→    14→import type { NewsRow } from '@/components/gold/NewsGrid'
+    15→    15→import {
+    16→    16→  GitBranch, Database, CheckCircle2, Loader2, XCircle, Circle,
+    17→    17→  Activity, RefreshCw, FlaskConical, Server, TrendingUp, Sparkles, Coins,
+    18→    18→  CandlestickChart, Newspaper, Gauge, Command as CommandIcon, Zap,
+    19→    19→} from 'lucide-react'
+    20→    20→
+    21→    21→// محرك TradingView + AG Grid تعملان في المتصفح فقط
+    22→    22→const PriceChart = dynamic(() => import('@/components/gold/PriceChart'), { ssr: false })
+    23→    23→const NewsGrid = dynamic(() => import('@/components/gold/NewsGrid'), { ssr: false })
+    24→    24→
+    25→    25→interface Progress {
+    26→    26→  stage?: string; status?: string; detail?: string
+    27→    27→  train_n?: number; test_n?: number
+    28→    28→  trainable_params?: number; total_params?: number
+    29→    29→  step?: number; loss?: number; elapsed_s?: number
+    30→    30→  acc_baseline?: number; acc_final?: number
+    31→    31→  adapter_dir?: string; adapter_files?: number; adapter_mb?: number
+    32→    32→}
+    33→    33→interface Sample { input: string; gold: string; pred: string; ok: boolean }
+    34→    34→interface Results {
+    35→    35→  base_model: string; template: string
+    36→    36→  lora: { r: number; alpha: number; targets: string[]; trainable_params: number; total_params: number }
+    37→    37→  adapter?: { saved: boolean; dir: string; files: number; size_mb: number; instruction: string }
+    38→    38→  datasets: { train: string; test: string }
+    39→    39→  training: { steps: number; effective_batch: number; lr: number; seconds: number; loss_curve: number[] }
+    40→    40→  eval: { n: number; acc_before: number; acc_after: number }
+    41→    41→  samples_before: Sample[]; samples_after: Sample[]
+    42→    42→  hardware: { device: string; threads: number }
+    43→    43→}
+    44→    44→interface Verified { date: string; pytest: string; forex: string; packages_ok: string; torch: string; transformers: string }
+    45→    45→interface Repo { url: string; commit: string; exists: boolean }
+    46→    46→interface SysInfo { platform: string; arch: string; cpus: number; ram_gb: number; node: string }
+    47→    47→interface GoldProgress {
+    48→    48→  stage?: string; status?: string; detail?: string
+    49→    49→  train_n?: number; test_n?: number
+    50→    50→  step?: number; loss?: number; elapsed_s?: number
+    51→    51→  base_acc_on_gold?: number
+    52→    52→  adapter_mb?: number
+    53→    53→  acc_base?: number; acc_general?: number; acc_gold?: number
+    54→    54→}
+    55→    55→interface GoldResults {
+    56→    56→  base_model: string; keywords: string
+    57→    57→  train_n: number; test_n: number; label_dist: Record<string, number>
+    58→    58→  training: { steps: number; effective_batch: number; lr: number; seconds: number; loss_curve: number[] }
+    59→    59→  eval: { n: number; acc_base: number; acc_general: number; acc_gold: number }
+    60→    60→  samples: { input: string; gold: string; pred: string; ok: boolean }[]
+    61→    61→  adapter: { saved: boolean; dir: string; size_mb: number }
+    62→    62→  price: { symbol: string; currency: string; latest: number; prev: number | null; series: number[] } | null
+    63→    63→}
+    64→    64→interface GoldTestRow { id: number; input: string; output: string }
+    65→    65→interface ApiData {
+    66→    66→  progress: Progress | null; results: Results | null; verified: Verified | null
+    67→    67→  goldProgress: GoldProgress | null; goldResults: GoldResults | null
+    68→    68→  goldTest: GoldTestRow[] | null
+    69→    69→  repo: Repo | null; sys: SysInfo | null; ts: number
+    70→    70→}
+    71→    71→interface GoldDailySummary {
+    72→    72→  symbol: string; name: string; last: number; prev_close: number
+    73→    73→  chg_1d_pct: number; chg_1y_pct: number; high_52w: number; low_52w: number
+    74→    74→  currency: string; count: number; first_date: string; last_date: string
+    75→    75→}
+    76→    76→interface GoldDaily { summary: GoldDailySummary; candles: Candle[] }
+    77→    77→interface PredResult { pred: string; raw?: string; latency_ms: number; adapter?: string; pred_general?: string }
+    78→    78→
+    79→    79→const EXAMPLES = [
+    80→    80→  { label: 'ذهب يسجل قمة تاريخية', text: 'Gold prices surge to a record high as central banks keep buying bullion.' },
+    81→    81→  { label: 'الدولار يقمع الذهب', text: 'Gold prices slip as the dollar strengthens after stronger-than-expected US jobs data.' },
+    82→    82→  { label: 'ترقب قرارات الفيدرالي', text: 'Spot gold trades flat in quiet dealing ahead of the Federal Reserve minutes release.' },
+    83→    83→  { label: 'شركة مناجم تتفوق', text: 'Barrick Gold beats quarterly production estimates and raises full-year guidance.' },
+    84→    84→]
+    85→    85→
+    86→    86→function predBadge(p?: string): string {
+    87→    87→  if (p === 'positive') return 'bg-emerald-600 text-white'
+    88→    88→  if (p === 'negative') return 'bg-red-500 text-white'
+    89→    89→  return 'bg-neutral-500 text-white'
+    90→    90→}
+    91→    91→function predLabel(p?: string): string {
+    92→    92→  if (p === 'positive') return 'إيجابي'
+    93→    93→  if (p === 'negative') return 'سلبي'
+    94→    94→  if (p === 'neutral') return 'محايد'
+    95→    95→  return p || '—'
+    96→    96→}
+    97→    97→
+    98→    98→const STEPS = [
+    99→    99→  { key: 'download_data', label: 'تحميل بيانات FinGPT (sentiment-train + sentiment-cls)' },
+   100→   100→  { key: 'load_model', label: 'تحميل النموذج الأساسي + محوّل LoRA' },
+   101→   101→  { key: 'baseline_eval', label: 'تقييم أساسي قبل الضبط الدقيق' },
+   102→   102→  { key: 'training', label: 'تدريب LoRA على بيانات المشاعر المالية' },
+   103→   103→  { key: 'export_adapter', label: 'تصدير أوزان LoRA لخدمة الاستدلال الحيّ' },
+   104→   104→  { key: 'finetuned_eval', label: 'تقييم نهائي بعد الضبط الدقيق' },
+   105→   105→]
+   106→   106→
+   107→   107→const GOLD_STEPS = [
+   108→   108→  { key: 'filter_data', label: 'تصفية أخبار الذهب من بيانات FinGPT (gold / XAU / GLD / GDX / bullion)' },
+   109→   109→  { key: 'load_model', label: 'تحميل النموذج العام + إضافة محوّل ذهب جديد (تدريب متتابع)' },
+   110→   110→  { key: 'gold_training', label: 'تدريب محوّل الذهب على أسطر الذهب فقط' },
+   111→   111→  { key: 'save_adapter', label: 'حفظ محوّل الذهب (adapter_gold)' },
+   112→   112→  { key: 'eval_gold', label: 'مقارنة ثلاثية على أخبار الذهب: أساسي × عام × ذهب' },
+   113→   113→  { key: 'gold_price', label: 'جلب سعر الذهب الحقيقي (عقود COMEX)' },
+   114→   114→]
+   115→   115→
+   116→   116→function fmtParams(n?: number): string {
+   117→   117→  if (!n) return '—'
+   118→   118→  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B'
+   119→   119→  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M'
+   120→   120→  return String(n)
+   121→   121→}
+   122→   122→function pct(a?: number): string {
+   123→   123→  return a != null ? (a * 100).toFixed(1) + '%' : '—'
+   124→   124→}
+   125→   125→
+   126→   126→function StageIcon({ state }: { state: 'running' | 'done' | 'pending' | 'error' }) {
+   127→   127→  if (state === 'done') return <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-500" />
+   128→   128→  if (state === 'running') return <Loader2 className="h-5 w-5 shrink-0 animate-spin text-amber-400" />
+   129→   129→  if (state === 'error') return <XCircle className="h-5 w-5 shrink-0 text-red-500" />
+   130→   130→  return <Circle className="h-5 w-5 shrink-0 text-neutral-600" />
+   131→   131→}
+   132→   132→
+   133→   133→function Bar({ label, value, color }: { label: string; value: number; color: string }) {
+   134→   134→  return (
+   135→   135→    <div>
+   136→   136→      <div className="mb-1 flex items-center justify-between text-sm">
+   137→   137→        <span className="text-neutral-400">{label}</span>
+   138→   138→        <span className="num font-semibold" dir="ltr">{pct(value)}</span>
+   139→   139→      </div>
+   140→   140→      <div className="h-3 w-full overflow-hidden rounded-full bg-neutral-800">
+   141→   141→        <motion.div
+   142→   142→          className={`h-full rounded-full ${color}`}
+   143→   143→          initial={{ width: 0 }}
+   144→   144→          whileInView={{ width: `${Math.max(2, value * 100)}%` }}
+   145→   145→          viewport={{ once: true }}
+   146→   146→          transition={{ duration: 1.1, ease: [0.16, 1, 0.3, 1] }}
+   147→   147→        />
+   148→   148→      </div>
+   149→   149→    </div>
+   150→   150→  )
+   151→   151→}
+   152→   152→
+   153→   153→function LossCurve({ curve, color = '#f59e0b' }: { curve: number[]; color?: string }) {
+   154→   154→  if (!curve || curve.length < 2) return null
+   155→   155→  const pts = curve.filter((_, i) => i % Math.max(1, Math.ceil(curve.length / 40)) === 0 || i === curve.length - 1)
+   156→   156→  const max = Math.max(...pts), min = Math.min(...pts)
+   157→   157→  const rng = max - min || 1
+   158→   158→  const coords = pts.map((v, i) => `${(i / (pts.length - 1)) * 100},${28 - ((v - min) / rng) * 24}`).join(' ')
+   159→   159→  return (
+   160→   160→    <div>
+   161→   161→      <div className="mb-2 flex items-center gap-2 text-sm text-neutral-400">
+   162→   162→        <TrendingUp className="h-4 w-4" style={{ color }} /> منحنى خسارة التدريب
+   163→   163→      </div>
+   164→   164→      <svg viewBox="0 0 100 30" preserveAspectRatio="none" className="h-24 w-full rounded-md bg-neutral-900/60 ring-1 ring-amber-500/10" role="img" aria-label="منحنى الخسارة">
+   165→   165→        <polyline points={coords} fill="none" stroke={color} strokeWidth="1.2" vectorEffect="non-scaling-stroke" />
+   166→   166→      </svg>
+   167→   167→      <div className="num mt-1 flex justify-between text-xs text-neutral-500" dir="ltr">
+   168→   168→        <span>{pts[0].toFixed(3)}</span>
+   169→   169→        <span>{pts[pts.length - 1].toFixed(3)}</span>
+   170→   170→      </div>
+   171→   171→    </div>
+   172→   172→  )
+   173→   173→}
+   174→   174→
+   175→   175→const reveal = {
+   176→   176→  initial: { opacity: 0, y: 26 },
+   177→   177→  whileInView: { opacity: 1, y: 0 },
+   178→   178→  viewport: { once: true, margin: '-40px' },
+   179→   179→  transition: { duration: 0.55, ease: [0.16, 1, 0.3, 1] as const },
+   180→   180→}
+   181→   181→
+   182→   182→export default function Home() {
+   183→   183→  const [data, setData] = useState<ApiData | null>(null)
+   184→   184→  const [goldDaily, setGoldDaily] = useState<GoldDaily | null>(null)
+   185→   185→  const [text, setText] = useState('')
+   186→   186→  const [pred, setPred] = useState<PredResult | null>(null)
+   187→   187→  const [predBusy, setPredBusy] = useState(false)
+   188→   188→  const [predErr, setPredErr] = useState('')
+   189→   189→  const [modelSel, setModelSel] = useState<'general' | 'gold'>('gold')
+   190→   190→  const [newsRows, setNewsRows] = useState<NewsRow[]>([])
+   191→   191→  const newsInit = useRef(false)
+   192→   192→
+   193→   193→  const runPredict = useCallback(async (t: string, model: 'general' | 'gold' = 'gold') => {
+   194→   194→    const input = t.trim()
+   195→   195→    if (!input) return
+   196→   196→    setPredBusy(true); setPredErr(''); setPred(null)
+   197→   197→    try {
+   198→   198→      const r = await fetch('/api/fingpt/predict', {
+   199→   199→        method: 'POST',
+   200→   200→        headers: { 'Content-Type': 'application/json' },
+   201→   201→        body: JSON.stringify({ text: input, model }),
+   202→   202→      })
+   203→   203→      const j = await r.json()
+   204→   204→      if (!r.ok) setPredErr(j?.error || 'فشل التحليل')
+   205→   205→      else setPred(j)
+   206→   206→    } catch { setPredErr('تعذّر الاتصال بالخادم') }
+   207→   207→    finally { setPredBusy(false) }
+   208→   208→  }, [])
+   209→   209→
+   210→   210→  const load = useCallback(async () => {
+   211→   211→    try {
+   212→   212→      const r = await fetch('/api/fingpt', { cache: 'no-store' })
+   213→   213→      setData(await r.json())
+   214→   214→    } catch { /* retry on next tick */ }
+   215→   215→  }, [])
+   216→   216→
+   217→   217→  const loadPrices = useCallback(async () => {
+   218→   218→    try {
+   219→   219→      const r = await fetch('/gold/gold_daily.json', { cache: 'no-store' })
+   220→   220→      if (r.ok) setGoldDaily(await r.json())
+   221→   221→    } catch { /* keep old data */ }
+   222→   222→  }, [])
+   223→   223→
+   224→   224→  useEffect(() => {
+   225→   225→    const t = setTimeout(load, 0)
+   226→   226→    const id = setInterval(load, 4000)
+   227→   227→    loadPrices()
+   228→   228→    return () => { clearTimeout(t); clearInterval(id) }
+   229→   229→  }, [load, loadPrices])
+   230→   230→
+   231→   231→  // قاعة الأخبار: تجهيز الصفوف مرة واحدة من مجموعة التقييم الحقيقية
+   232→   232→  useEffect(() => {
+   233→   233→    if (newsInit.current || !data?.goldTest?.length) return
+   234→   234→    newsInit.current = true
+   235→   235→    setNewsRows(data.goldTest.map((r) => ({ id: r.id, title: r.input, truth: r.output, state: 'pending' as const })))
+   236→   236→  }, [data])
+   237→   237→
+   238→   238→  const p = data?.progress ?? null
+   239→   239→  const res = data?.results ?? null
+   240→   240→  const gp = data?.goldProgress ?? null
+   241→   241→  const gr = data?.goldResults ?? null
+   242→   242→  const stageIdx = STEPS.findIndex(s => s.key === p?.stage)
+   243→   243→  const errored = p?.stage === 'error'
+   244→   244→  const gStageIdx = GOLD_STEPS.findIndex(s => s.key === gp?.stage)
+   245→   245→  const gErrored = gp?.stage === 'error'
+   246→   246→
+   247→   247→  const sum = goldDaily?.summary
+   248→   248→  const lastPrice = sum?.last ?? gr?.price?.latest ?? null
+   249→   249→  const chgDay = sum?.chg_1d_pct ?? (gr?.price?.latest != null && gr?.price?.prev != null
+   250→   250→    ? (gr.price.latest / gr.price.prev - 1) * 100 : null)
+   251→   251→
+   252→   252→  const go = useCallback((id: string) => {
+   253→   253→    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+   254→   254→  }, [])
+   255→   255→
+   256→   256→  const actions: PaletteAction[] = useMemo(() => [
+   257→   257→    { id: 'nav-chart', group: 'تنقّل', label: 'الرسم البياني — شموع الذهب', hint: '#chart', run: () => go('chart') },
+   258→   258→    { id: 'nav-news', group: 'تنقّل', label: 'قاعة الأخبار الحية', hint: '#news', run: () => go('news') },
+   259→   259→    { id: 'nav-model', group: 'تنقّل', label: 'نموذج الذهب — المقارنة الثلاثية', hint: '#model', run: () => go('model') },
+   260→   260→    { id: 'nav-pipeline', group: 'تنقّل', label: 'مسار التدريب', hint: '#pipeline', run: () => go('pipeline') },
+   261→   261→    { id: 'nav-live', group: 'تنقّل', label: 'التجربة الحية', hint: '#live', run: () => go('live') },
+   262→   262→    { id: 'act-analyze', group: 'إجراءات', label: 'تشغيل التحليل الحي لقاعة الأخبار', hint: '40 خبراً', run: () => { go('news'); window.dispatchEvent(new Event('fingpt:analyze')) } },
+   263→   263→    { id: 'act-refresh', group: 'إجراءات', label: 'تحديث البيانات الآن', hint: 'F5 منطقي', run: () => { load(); loadPrices() } },
+   264→   264→    ...EXAMPLES.map((ex, i) => ({
+   265→   265→      id: `ex-${i}`, group: 'أمثلة ذهبية' as const, label: ex.label, hint: 'تحليل فوري',
+   266→   266→      run: () => { go('live'); setText(ex.text); runPredict(ex.text, 'gold') },
+   267→   267→    })),
+   268→   268→  ], [go, load, loadPrices, runPredict])
+   269→   269→
+   270→   270→  return (
+   271→   271→    <div dir="rtl" className="relative flex min-h-screen flex-col bg-background text-foreground">
+   272→   272→      {/* توهج ذهبي علوي */}
+   273→   273→      <div className="pointer-events-none fixed inset-x-0 top-0 z-0 h-80 bg-[radial-gradient(ellipse_at_top,rgba(245,158,11,0.12),transparent_62%)]" />
+   274→   274→
+   275→   275→      {/* Header */}
+   276→   276→      <header className="sticky top-0 z-50 border-b border-amber-500/15 bg-background/80 backdrop-blur-md">
+   277→   277→        <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-2 px-4 py-3 sm:px-6">
+   278→   278→          <div className="flex items-center gap-3">
+   279→   279→            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-amber-300 to-amber-600 text-lg shadow-lg shadow-amber-500/25">
+   280→   280→              🥇
+   281→   281→            </div>
+   282→   282→            <div>
+   283→   283→              <h1 className="text-lg font-bold leading-tight sm:text-xl">
+   284→   284→                FinGPT <span className="gold-text">Gold</span> — طرفية سوق الذهب
+   285→   285→              </h1>
+   286→   286→              <p className="text-xs text-neutral-400">نموذج مالي متخصص بأخبار الذهب · دقة 92.5% على بيانات لم يرها التدريب</p>
+   287→   287→            </div>
+   288→   288→          </div>
+   289→   289→          <div className="flex items-center gap-2">
+   290→   290→            <Badge variant="outline" className="gap-1 border-amber-500/40 bg-amber-500/10 text-amber-300">
+   291→   291→              <Activity className="h-3 w-3" /> بث حي كل 4 ثوانٍ
+   292→   292→            </Badge>
+   293→   293→            <button
+   294→   294→              onClick={() => window.dispatchEvent(new Event('fingpt:palette'))}
+   295→   295→              className="flex items-center gap-2 rounded-lg border border-neutral-700 px-2.5 py-1.5 text-xs text-neutral-400 transition hover:border-amber-500/40 hover:text-amber-300"
+   296→   296→            >
+   297→   297→              <CommandIcon className="h-3.5 w-3.5" /> لوحة الأوامر
+   298→   298→              <kbd className="num rounded border border-neutral-700 px-1 text-[10px]" dir="ltr">⌘K</kbd>
+   299→   299→            </button>
+   300→   300→          </div>
+   301→   301→        </div>
+   302→   302→      </header>
+   303→   303→
+   304→   304→      <main className="relative z-10 mx-auto w-full max-w-6xl flex-1 space-y-8 px-4 py-6 sm:px-6">
+   305→   305→
+   306→   306→        {/* KPIs */}
+   307→   307→        <motion.section {...reveal} aria-label="مؤشرات السوق والنموذج" className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+   308→   308→          <Card className="border-amber-500/20 bg-gradient-to-br from-amber-500/10 to-transparent">
+   309→   309→            <CardContent className="p-4">
+   310→   310→              <p className="text-xs text-neutral-400">الذهب — عقود COMEX (GC=F)</p>
+   311→   311→              <div className="mt-1 flex items-baseline gap-2">
+   312→   312→                {lastPrice != null ? (
+   313→   313→                  <CountUp value={lastPrice} decimals={1} prefix="$" className="text-3xl font-bold text-amber-300" />
+   314→   314→                ) : (
+   315→   315→                  <span className="num text-3xl text-neutral-500">…</span>
+   316→   316→                )}
+   317→   317→                {chgDay != null && (
+   318→   318→                  <Badge className={chgDay >= 0 ? 'bg-emerald-600 text-white' : 'bg-red-500 text-white'} dir="ltr">
+   319→   319→                    {chgDay >= 0 ? '+' : ''}{chgDay.toFixed(2)}%
+   320→   320→                  </Badge>
+   321→   321→                )}
+   322→   322→              </div>
+   323→   323→              <p className="num mt-1 text-[11px] text-neutral-500" dir="ltr">{sum?.last_date || 'Yahoo Finance'} · real data</p>
+   324→   324→            </CardContent>
+   325→   325→          </Card>
+   326→   326→
+   327→   327→          <Card>
+   328→   328→            <CardContent className="p-4">
+   329→   329→              <p className="text-xs text-neutral-400">نطاق 52 أسبوعاً</p>
+   330→   330→              <div className="mt-1 flex items-baseline gap-3">
+   331→   331→                <span className="num text-lg font-bold text-neutral-200" dir="ltr">${(sum?.low_52w ?? 0).toLocaleString('en-US')}</span>
+   332→   332→                <span className="text-xs text-neutral-500">→</span>
+   333→   333→                <span className="num text-lg font-bold text-amber-300" dir="ltr">${(sum?.high_52w ?? 0).toLocaleString('en-US')}</span>
+   334→   334→              </div>
+   335→   335→              {sum && (
+   336→   336→                <div className="mt-2 h-1.5 w-full rounded-full bg-neutral-800">
+   337→   337→                  <div
+   338→   338→                    className="h-full rounded-full bg-gradient-to-r from-amber-600 to-amber-300"
+   339→   339→                    style={{ width: `${Math.max(2, Math.min(100, ((sum.last - sum.low_52w) / Math.max(1e-9, sum.high_52w - sum.low_52w)) * 100))}%` }}
+   340→   340→                  />
+   341→   341→                </div>
+   342→   342→              )}
+   343→   343→              <p className="mt-1 text-[11px] text-neutral-500">تغير سنوي: <span className={`num ${(sum?.chg_1y_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`} dir="ltr">{sum ? `${sum.chg_1y_pct >= 0 ? '+' : ''}${sum.chg_1y_pct}%` : '—'}</span></p>
+   344→   344→            </CardContent>
+   345→   345→          </Card>
+   346→   346→
+   347→   347→          <Card>
+   348→   348→            <CardContent className="p-4">
+   349→   349→              <p className="text-xs text-neutral-400">دقة نموذج الذهب (اختبار محجوب)</p>
+   350→   350→              <div className="mt-1 flex items-baseline gap-2">
+   351→   351→                {gr ? (
+   352→   352→                  <CountUp value={gr.eval.acc_gold * 100} decimals={1} suffix="%" className="text-3xl font-bold text-amber-300" />
+   353→   353→                ) : <span className="num text-3xl text-neutral-500">…</span>}
+   354→   354→                <span className="text-xs text-neutral-500">مقابل</span>
+   355→   355→              </div>
+   356→   356→              <div className="num mt-1 flex gap-3 text-[11px] text-neutral-400" dir="ltr">
+   357→   357→                <span>base {gr ? pct(gr.eval.acc_base) : '—'}</span>
+   358→   358→                <span>general {gr ? pct(gr.eval.acc_general) : '—'}</span>
+   359→   359→              </div>
+   360→   360→            </CardContent>
+   361→   361→          </Card>
+   362→   362→
+   363→   363→          <Card>
+   364→   364→            <CardContent className="p-4">
+   365→   365→              <p className="text-xs text-neutral-400">محرك الاستدلال الحي</p>
+   366→   366→              <div className="mt-2 flex flex-wrap gap-1.5">
+   367→   367→                <Badge className="bg-amber-500 text-amber-950">نموذج الذهب ✓</Badge>
+   368→   368→                <Badge className="bg-neutral-600 text-white">العام ✓</Badge>
+   369→   369→              </div>
+   370→   370→              <p className="mt-2 text-[11px] text-neutral-500">Qwen2.5-0.5B + محوّلا LoRA · CPU</p>
+   371→   371→              <Button size="sm" variant="outline" className="mt-2 h-7 border-amber-500/40 text-xs text-amber-300 hover:bg-amber-500/10" onClick={() => go('live')}>
+   372→   372→                جرّبه الآن <Zap className="h-3 w-3" />
+   373→   373→              </Button>
+   374→   374→            </CardContent>
+   375→   375→          </Card>
+   376→   376→        </motion.section>
+   377→   377→
+   378→   378→        {/* Chart */}
+   379→   379→        <motion.section {...reveal} id="chart" aria-label="الرسم البياني" className="scroll-mt-20">
+   380→   380→          <h2 className="mb-3 flex items-center gap-2 text-lg font-bold">
+   381→   381→            <CandlestickChart className="h-5 w-5 text-amber-400" />
+   382→   382→            شموع الذهب — محرك <span className="gold-text">TradingView Lightweight Charts v5</span>
+   383→   383→          </h2>
+   384→   384→          <Card>
+   385→   385→            <CardContent className="p-3 sm:p-4">
+   386→   386→              {goldDaily?.candles?.length ? (
+   387→   387→                <PriceChart candles={goldDaily.candles} />
+   388→   388→              ) : (
+   389→   389→                <div className="flex h-[380px] items-center justify-center text-sm text-neutral-500">
+   390→   390→                  <Loader2 className="ml-2 h-4 w-4 animate-spin" /> جارٍ تحميل الشموع…
+   391→   391→                </div>
+   392→   392→              )}
+   393→   393→              <p className="num mt-2 text-[11px] text-neutral-500" dir="ltr">
+   394→   394→                {sum ? `${sum.count} candles · ${sum.first_date} → ${sum.last_date} · Yahoo Finance (real COMEX futures)` : ''}
+   395→   395→              </p>
+   396→   396→            </CardContent>
+   397→   397→          </Card>
+   398→   398→        </motion.section>
+   399→   399→
+   400→   400→        {/* News room */}
+   401→   401→        <motion.section {...reveal} id="news" aria-label="قاعة الأخبار" className="scroll-mt-20">
+   402→   402→          <h2 className="mb-3 flex items-center gap-2 text-lg font-bold">
+   403→   403→            <Newspaper className="h-5 w-5 text-amber-400" />
+   404→   404→            قاعة الأخبار الحية — <span className="gold-text">AG Grid v36</span> + تصنيف لحظي بالنموذجين
+   405→   405→          </h2>
+   406→   406→          <Card>
+   407→   407→            <CardHeader className="pb-2">
+   408→   408→              <CardTitle className="text-sm font-medium text-neutral-300">
+   409→   409→                40 خبراً ذهبياً حقيقياً من مجموعة التقييم (لم يرها التدريب) — كل صف يُصنَّف مباشرة بكل من نموذج الذهب والنموذج العام، مع وميض الخلية عند وصول النتيجة
+   410→   410→              </CardTitle>
+   411→   411→            </CardHeader>
+   412→   412→            <CardContent className="p-3 sm:p-4">
+   413→   413→              {newsRows.length ? (
+   414→   414→                <NewsGrid rows={newsRows} />
+   415→   415→              ) : (
+   416→   416→                <div className="flex h-40 items-center justify-center text-sm text-neutral-500">
+   417→   417→                  <Loader2 className="ml-2 h-4 w-4 animate-spin" /> جارٍ تجهيز قاعة الأخبار…
+   418→   418→                </div>
+   419→   419→              )}
+   420→   420→            </CardContent>
+   421→   421→          </Card>
+   422→   422→        </motion.section>
+   423→   423→
+   424→   424→        {/* Gold model comparison */}
+   425→   425→        <motion.section {...reveal} id="model" aria-label="نموذج الذهب" className="scroll-mt-20">
+   426→   426→          <h2 className="mb-3 flex items-center gap-2 text-lg font-bold">
+   427→   427→            <Gauge className="h-5 w-5 text-amber-400" />
+   428→   428→            نموذج الذهب المتخصص — <span className="gold-text">التخصص يرفع الدقة</span>
+   429→   429→          </h2>
+   430→   430→          {gr ? (
+   431→   431→            <div className="grid gap-4 lg:grid-cols-2">
+   432→   432→              <Card>
+   433→   433→                <CardHeader className="pb-2"><CardTitle className="text-base">دقة تصنيف أخبار الذهب ({gr.eval.n} مثالاً محجوباً)</CardTitle></CardHeader>
+   434→   434→                <CardContent className="space-y-4">
+   435→   435→                  <Bar label="النموذج الأساسي (بدون ضبط)" value={gr.eval.acc_base} color="bg-neutral-500" />
+   436→   436→                  <Bar label="النموذج العام (بيانات FinGPT الكاملة)" value={gr.eval.acc_general} color="bg-amber-400" />
+   437→   437→                  <Bar label="نموذج الذهب (تخصص متتابع)" value={gr.eval.acc_gold} color="bg-gradient-to-r from-amber-600 to-amber-300" />
+   438→   438→                  <p className="text-xs text-neutral-500">
+   439→   439→                    تدريب متتابع على {gr.train_n} سطراً ذهبياً ({gr.keywords}) · محوّل {gr.adapter.size_mb} MB · تصنيفات الاختبار: {Object.entries(gr.label_dist).map(([k, v]) => `${k}=${v}`).join('، ')}
+   440→   440→                  </p>
+   441→   441→                </CardContent>
+   442→   442→              </Card>
+   443→   443→              <Card>
+   444→   444→                <CardHeader className="pb-2"><CardTitle className="text-base">تفاصيل تخصص الذهب</CardTitle></CardHeader>
+   445→   445→                <CardContent className="space-y-3 text-sm text-neutral-400">
+   446→   446→                  <LossCurve curve={gr.training.loss_curve} />
+   447→   447→                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+   448→   448→                    <span>خطوات: <b className="num" dir="ltr">{gr.training.steps}</b></span>
+   449→   449→                    <span>حزمة فعّالة: <b className="num" dir="ltr">{gr.training.effective_batch}</b></span>
+   450→   450→                    <span>معدل التعلم: <b className="num" dir="ltr">{gr.training.lr}</b></span>
+   451→   451→                    <span>المدة: <b className="num" dir="ltr">{gr.training.seconds}s</b></span>
+   452→   452→                  </div>
+   453→   453→                </CardContent>
+   454→   454→              </Card>
+   455→   455→            </div>
+   456→   456→          ) : (
+   457→   457→            <Card><CardContent className="p-6 text-sm text-neutral-500">نتائج نموذج الذهب ستظهر هنا بعد اكتمال التدريب.</CardContent></Card>
+   458→   458→          )}
+   459→   459→        </motion.section>
+   460→   460→
+   461→   461→        <Separator className="opacity-50" />
+   462→   462→
+   463→   463→        {/* General pipeline */}
+   464→   464→        <motion.section {...reveal} id="pipeline" aria-label="مسار التشغيل" className="scroll-mt-20">
+   465→   465→          <h2 className="mb-3 flex items-center gap-2 text-lg font-bold"><Database className="h-5 w-5 text-amber-400" /> مسار التشغيل الحيّ — ضبط LoRA على المشاعر المالية</h2>
+   466→   466→          <div className="grid gap-4 lg:grid-cols-2">
+   467→   467→            <Card>
+   468→   468→              <CardContent className="p-4 sm:p-6">
+   469→   469→                {!p && <p className="text-sm text-neutral-500">في انتظار أول قراءة…</p>}
+   470→   470→                {p && (
+   471→   471→                  <ol className="space-y-4">
+   472→   472→                    {STEPS.map((s, i) => {
+   473→   473→                      const state: 'running' | 'done' | 'pending' | 'error' =
+   474→   474→                        errored && i === stageIdx ? 'error'
+   475→   475→                          : errored && i < stageIdx ? 'done'
+   476→   476→                          : i < stageIdx || p.stage === 'done' ? 'done'
+   477→   477→                          : i === stageIdx ? (p.status === 'done' ? 'done' : 'running')
+   478→   478→                          : 'pending'
+   479→   479→                      return (
+   480→   480→                        <li key={s.key} className="flex items-start gap-3">
+   481→   481→                          <StageIcon state={state} />
+   482→   482→                          <div className="min-w-0 flex-1">
+   483→   483→                            <p className={`text-sm font-medium ${state === 'pending' ? 'text-neutral-600' : ''}`}>{s.label}</p>
+   484→   484→                            {s.key === 'download_data' && p.train_n != null && (
+   485→   485→                              <p className="num text-xs text-neutral-500" dir="ltr">{p.train_n} train · {p.test_n} test (HuggingFace: FinGPT)</p>
+   486→   486→                            )}
+   487→   487→                            {s.key === 'load_model' && p.trainable_params != null && (
+   488→   488→                              <p className="text-xs text-neutral-500">Qwen2.5-0.5B-Instruct · قابل للتدريب: {fmtParams(p.trainable_params)} / {fmtParams(p.total_params)}</p>
+   489→   489→                            )}
+   490→   490→                            {s.key === 'baseline_eval' && p.acc_baseline != null && (
+   491→   491→                              <p className="text-xs text-neutral-500">قبل الضبط: <b className="num" dir="ltr">{pct(p.acc_baseline)}</b></p>
+   492→   492→                            )}
+   493→   493→                            {s.key === 'training' && state === 'running' && p.step != null && (
+   494→   494→                              <p className="num text-xs text-neutral-500" dir="ltr">step {p.step} · loss {p.loss ?? '—'} · {p.elapsed_s ?? 0}s</p>
+   495→   495→                            )}
+   496→   496→                            {s.key === 'export_adapter' && state === 'done' && p.adapter_mb != null && (
+   497→   497→                              <p className="text-xs text-neutral-500">أوزان {p.adapter_mb} MB في <span dir="ltr" className="font-mono">fingpt_run/adapter</span></p>
+   498→   498→                            )}
+   499→   499→                            {s.key === 'finetuned_eval' && p.acc_final != null && (
+   500→   500→                              <p className="text-xs text-neutral-500">بعد الضبط: <b className="num text-emerald-400" dir="ltr">{pct(p.acc_final)}</b></p>
+   501→   501→                            )}
+   502→   502→                            {errored && s.key === p.stage && (
+   503→   503→                              <p className="mt-1 break-all rounded bg-red-950/60 p-2 font-mono text-xs text-red-400">{p.detail}</p>
+   504→   504→                            )}
+   505→   505→                          </div>
+   506→   506→                        </li>
+   507→   507→                      )
+   508→   508→                    })}
+   509→   509→                  </ol>
+   510→   510→                )}
+   511→   511→              </CardContent>
+   512→   512→            </Card>
+   513→   513→
+   514→   514→            {/* Gold pipeline */}
+   515→   515→            <Card>
+   516→   516→              <CardContent className="p-4 sm:p-6">
+   517→   517→                <p className="mb-3 flex items-center gap-2 text-sm font-bold text-amber-300"><Coins className="h-4 w-4" /> مسار تخصص الذهب (مضاف عليه)</p>
+   518→   518→                {!gp && <p className="text-sm text-neutral-500">لم يبدأ بعد.</p>}
+   519→   519→                {gp && (
+   520→   520→                  <ol className="space-y-4">
+   521→   521→                    {GOLD_STEPS.map((s, i) => {
+   522→   522→                      const state: 'running' | 'done' | 'pending' | 'error' =
+   523→   523→                        gErrored && i === gStageIdx ? 'error'
+   524→   524→                          : gErrored && i < gStageIdx ? 'done'
+   525→   525→                          : i < gStageIdx || gp.stage === 'done' ? 'done'
+   526→   526→                          : i === gStageIdx ? (gp.status === 'done' ? 'done' : 'running')
+   527→   527→                          : 'pending'
+   528→   528→                      return (
+   529→   529→                        <li key={s.key} className="flex items-start gap-3">
+   530→   530→                          <StageIcon state={state} />
+   531→   531→                          <div className="min-w-0 flex-1">
+   532→   532→                            <p className={`text-sm font-medium ${state === 'pending' ? 'text-neutral-600' : ''}`}>{s.label}</p>
+   533→   533→                            {s.key === 'filter_data' && gp.train_n != null && (
+   534→   534→                              <p className="num text-xs text-neutral-500" dir="ltr">{gp.train_n} train · {gp.test_n} test (gold-only)</p>
+   535→   535→                            )}
+   536→   536→                            {s.key === 'gold_training' && state === 'running' && gp.step != null && (
+   537→   537→                              <p className="num text-xs text-neutral-500" dir="ltr">step {gp.step} · loss {gp.loss ?? '—'} · {gp.elapsed_s ?? 0}s</p>
+   538→   538→                            )}
+   539→   539→                            {s.key === 'save_adapter' && state === 'done' && gp.adapter_mb != null && (
+   540→   540→                              <p className="text-xs text-neutral-500">محوّل {gp.adapter_mb} MB في <span dir="ltr" className="font-mono">fingpt_run/adapter_gold</span></p>
+   541→   541→                            )}
+   542→   542→                            {s.key === 'eval_gold' && state === 'done' && (
+   543→   543→                              <p className="num text-xs text-neutral-500" dir="ltr">gold {pct(gp.acc_gold)} · general {pct(gp.acc_general)} · base {pct(gp.acc_base)}</p>
+   544→   544→                            )}
+   545→   545→                            {gErrored && s.key === gp.stage && (
+   546→   546→                              <p className="mt-1 break-all rounded bg-red-950/60 p-2 font-mono text-xs text-red-400">{gp.detail}</p>
+   547→   547→                            )}
+   548→   548→                          </div>
+   549→   549→                        </li>
+   550→   550→                      )
+   551→   551→                    })}
+   552→   552→                  </ol>
+   553→   553→                )}
+   554→   554→              </CardContent>
+   555→   555→            </Card>
+   556→   556→          </div>
+   557→   557→        </motion.section>
+   558→   558→
+   559→   559→        {/* General results */}
+   560→   560→        {res && (
+   561→   561→          <motion.section {...reveal} aria-label="نتائج النموذج العام">
+   562→   562→            <h2 className="mb-3 text-lg font-bold">نتائج النموذج العام (المرحلة الأولى)</h2>
+   563→   563→            <div className="grid gap-4 lg:grid-cols-2">
+   564→   564→              <Card>
+   565→   565→                <CardHeader className="pb-2"><CardTitle className="text-base">دقة تصنيف المشاعر ({res.eval.n} مثالاً)</CardTitle></CardHeader>
+   566→   566→                <CardContent className="space-y-4">
+   567→   567→                  <Bar label="قبل الضبط (نموذج أساسي)" value={res.eval.acc_before} color="bg-neutral-500" />
+   568→   568→                  <Bar label="بعد ضبط LoRA ببيانات FinGPT" value={res.eval.acc_after} color="bg-emerald-500" />
+   569→   569→                  <p className="text-xs text-neutral-500">قالب FinGPT الرسمي: <span dir="ltr" className="font-mono">Instruction / Input / Answer</span></p>
+   570→   570→                </CardContent>
+   571→   571→              </Card>
+   572→   572→              <Card>
+   573→   573→                <CardHeader className="pb-2"><CardTitle className="text-base">تفاصيل الضبط</CardTitle></CardHeader>
+   574→   574→                <CardContent className="space-y-3 text-sm text-neutral-400">
+   575→   575→                  <LossCurve curve={res.training.loss_curve} color="#34d399" />
+   576→   576→                  <div className="num grid grid-cols-2 gap-x-4 gap-y-1 text-xs" dir="ltr">
+   577→   577→                    <span>steps: <b>{res.training.steps}</b></span>
+   578→   578→                    <span>batch: <b>{res.training.effective_batch}</b></span>
+   579→   579→                    <span>lr: <b>{res.training.lr}</b></span>
+   580→   580→                    <span>secs: <b>{res.training.seconds}</b></span>
+   581→   581→                    <span>LoRA: <b>r={res.lora.r}, α={res.lora.alpha}</b></span>
+   582→   582→                    <span>targets: <b>{res.lora.targets.join('/')}</b></span>
+   583→   583→                  </div>
+   584→   584→                </CardContent>
+   585→   585→              </Card>
+   586→   586→            </div>
+   587→   587→          </motion.section>
+   588→   588→        )}
+   589→   589→
+   590→   590→        {/* Live experiment */}
+   591→   591→        <motion.section {...reveal} id="live" aria-label="تجربة حية" className="scroll-mt-20">
+   592→   592→          <h2 className="mb-3 flex items-center gap-2 text-lg font-bold">
+   593→   593→            <Sparkles className="h-5 w-5 text-amber-400" /> التجربة الحية — اكتب خبراً عن الذهب واختبر النموذجين
+   594→   594→          </h2>
+   595→   595→          <Card className="border-amber-500/20">
+   596→   596→            <CardContent className="space-y-3 p-4 sm:p-6">
+   597→   597→              <div className="flex flex-wrap items-center gap-2">
+   598→   598→                <span className="text-sm text-neutral-400">المحوّل:</span>
+   599→   599→                <button
+   600→   600→                  onClick={() => setModelSel('gold')}
+   601→   601→                  disabled={predBusy || !gr}
+   602→   602→                  className={`rounded-full px-3 py-1 text-xs transition-colors disabled:opacity-50 ${modelSel === 'gold' ? 'bg-amber-500 text-amber-950' : 'border border-neutral-700 text-neutral-400 hover:text-neutral-200'}`}
+   603→   603→                >
+   604→   604→                  🥇 نموذج الذهب — مع مقارنة
+   605→   605→                </button>
+   606→   606→                <button
+   607→   607→                  onClick={() => setModelSel('general')}
+   608→   608→                  disabled={predBusy}
+   609→   609→                  className={`rounded-full px-3 py-1 text-xs transition-colors disabled:opacity-50 ${modelSel === 'general' ? 'bg-neutral-500 text-white' : 'border border-neutral-700 text-neutral-400 hover:text-neutral-200'}`}
+   610→   610→                >
+   611→   611→                  النموذج العام
+   612→   612→                </button>
+   613→   613→              </div>
+   614→   614→              <Textarea
+   615→   615→                dir="auto" rows={3} value={text}
+   616→   616→                onChange={(e) => setText(e.target.value)}
+   617→   617→                placeholder="مثال: Gold rallies as the Fed signals rate cuts and the dollar weakens…"
+   618→   618→                className="border-neutral-700 bg-neutral-900/60"
+   619→   619→              />
+   620→   620→              <div className="flex flex-wrap items-center gap-2">
+   621→   621→                <Button
+   622→   622→                  onClick={() => runPredict(text, modelSel)}
+   623→   623→                  disabled={predBusy || !text.trim()}
+   624→   624→                  className="bg-amber-500 text-amber-950 shadow-lg shadow-amber-500/25 hover:bg-amber-400"
+   625→   625→                >
+   626→   626→                  {predBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+   627→   627→                  {predBusy ? 'جارٍ التحليل…' : 'حلّل المشاعر'}
+   628→   628→                </Button>
+   629→   629→                {EXAMPLES.map((ex) => (
+   630→   630→                  <button
+   631→   631→                    key={ex.label}
+   632→   632→                    onClick={() => { setText(ex.text); runPredict(ex.text, modelSel) }}
+   633→   633→                    disabled={predBusy}
+   634→   634→                    className="rounded-full border border-neutral-700 px-3 py-1 text-xs text-neutral-400 transition-colors hover:border-amber-500/40 hover:text-amber-300 disabled:opacity-50"
+   635→   635→                  >
+   636→   636→                    {ex.label}
+   637→   637→                  </button>
+   638→   638→                ))}
+   639→   639→              </div>
+   640→   640→              <p className="text-xs text-neutral-500">أول تحليل قد يستغرق حتى دقيقة (تحميل النموذج على CPU) — التالية خلال ثوانٍ.</p>
+   641→   641→              {predErr && <p className="rounded-md bg-red-950/60 p-3 text-sm text-red-400">{predErr}</p>}
+   642→   642→              {pred && (
+   643→   643→                <div className="rounded-md border border-amber-500/20 bg-neutral-900/60 p-3">
+   644→   644→                  <div className="flex flex-wrap items-center gap-2">
+   645→   645→                    <span className="text-sm text-neutral-400">التصنيف:</span>
+   646→   646→                    {modelSel === 'gold' && pred.pred_general ? (
+   647→   647→                      <>
+   648→   648→                        <Badge className={predBadge(pred.pred)}>🥇 الذهب: {predLabel(pred.pred)}</Badge>
+   649→   649→                        <span className="text-xs text-neutral-500">مقابل العام:</span>
+   650→   650→                        <Badge className={predBadge(pred.pred_general)}>{predLabel(pred.pred_general)}</Badge>
+   651→   651→                      </>
+   652→   652→                    ) : (
+   653→   653→                      <Badge className={predBadge(pred.pred)}>{predLabel(pred.pred)}</Badge>
+   654→   654→                    )}
+   655→   655→                    <span className="num text-xs text-neutral-500" dir="ltr">{pred.latency_ms} ms</span>
+   656→   656→                  </div>
+   657→   657→                  {pred.raw && <p className="num mt-2 break-all text-xs text-neutral-600" dir="ltr">raw: {pred.raw}</p>}
+   658→   658→                </div>
+   659→   659→              )}
+   660→   660→            </CardContent>
+   661→   661→          </Card>
+   662→   662→        </motion.section>
+   663→   663→
+   664→   664→        {/* Env footer cards */}
+   665→   665→        <motion.section {...reveal} aria-label="البيئة" className="grid gap-3 sm:grid-cols-3">
+   666→   666→          <Card>
+   667→   667→            <CardContent className="p-4 text-sm text-neutral-400">
+   668→   668→              <p className="mb-1 flex items-center gap-2 font-semibold text-neutral-200"><GitBranch className="h-4 w-4 text-amber-400" /> المستودع</p>
+   669→   669→              <p className="break-all text-xs">AI4Finance-Foundation/FinGPT</p>
+   670→   670→              <p className="num mt-1 break-all text-[11px] text-neutral-600" dir="ltr">{data?.repo?.commit || '—'}</p>
+   671→   671→            </CardContent>
+   672→   672→          </Card>
+   673→   673→          <Card>
+   674→   674→            <CardContent className="p-4 text-sm text-neutral-400">
+   675→   675→              <p className="mb-1 flex items-center gap-2 font-semibold text-neutral-200"><Server className="h-4 w-4 text-amber-400" /> بيئة التشغيل</p>
+   676→   676→              <p className="text-xs">{data?.sys?.cpus ?? '—'} أنوية · {data?.sys?.ram_gb ?? '—'} GB · CPU فقط</p>
+   677→   677→              <p className="num mt-1 text-[11px] text-neutral-600" dir="ltr">torch {data?.verified?.torch || '—'} · transformers {data?.verified?.transformers || '—'}</p>
+   678→   678→            </CardContent>
+   679→   679→          </Card>
+   680→   680→          <Card>
+   681→   681→            <CardContent className="p-4 text-sm text-neutral-400">
+   682→   682→              <p className="mb-1 flex items-center gap-2 font-semibold text-neutral-200"><FlaskConical className="h-4 w-4 text-amber-400" /> اختبارات المستودع</p>
+   683→   683→              <p className="text-xs">{data?.verified?.pytest || '…'}</p>
+   684→   684→              <p className="text-xs">Forex: {data?.verified?.forex || '…'}</p>
+   685→   685→            </CardContent>
+   686→   686→          </Card>
+   687→   687→        </motion.section>
+   688→   688→      </main>
+   689→   689→
+   690→   690→      <footer className="relative z-10 mt-auto border-t border-amber-500/10 bg-neutral-950/60 py-3 text-center text-xs text-neutral-500">
+   691→   691→        FinGPT Gold Terminal — بيانات COMEX حقيقية من Yahoo Finance · تصنيف لحظي على CPU · آخر تحديث:{' '}
+   692→   692→        <span dir="ltr" className="num">{data ? new Date(data.ts).toLocaleTimeString('en-GB') : '—'}</span>
+   693→   693→      </footer>
+   694→   694→
+   695→   695→      <CommandPalette actions={actions} />
+   696→   696→    </div>
+   697→   697→  )
+   698→   698→}
+   699→   699→

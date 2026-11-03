@@ -1,0 +1,560 @@
+     1→'use client'
+     2→
+     3→import { useCallback, useEffect, useState } from 'react'
+     4→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+     5→import { Badge } from '@/components/ui/badge'
+     6→import { Button } from '@/components/ui/button'
+     7→import { Separator } from '@/components/ui/separator'
+     8→import { Textarea } from '@/components/ui/textarea'
+     9→import {
+    10→  GitBranch, Cpu, Database, CheckCircle2, Loader2, XCircle, Circle,
+    11→  Activity, RefreshCw, BrainCircuit, FlaskConical, Server, TrendingUp, Sparkles, Coins,
+    12→} from 'lucide-react'
+    13→
+    14→interface Progress {
+    15→  stage?: string; status?: string; detail?: string
+    16→  train_n?: number; test_n?: number
+    17→  trainable_params?: number; total_params?: number
+    18→  step?: number; loss?: number; elapsed_s?: number
+    19→  acc_baseline?: number; acc_final?: number
+    20→  adapter_dir?: string; adapter_files?: number; adapter_mb?: number
+    21→}
+    22→interface Sample { input: string; gold: string; pred: string; ok: boolean }
+    23→interface Results {
+    24→  base_model: string; template: string
+    25→  lora: { r: number; alpha: number; targets: string[]; trainable_params: number; total_params: number }
+    26→  adapter?: { saved: boolean; dir: string; files: number; size_mb: number; instruction: string }
+    27→  datasets: { train: string; test: string }
+    28→  training: { steps: number; effective_batch: number; lr: number; seconds: number; loss_curve: number[] }
+    29→  eval: { n: number; acc_before: number; acc_after: number }
+    30→  samples_before: Sample[]; samples_after: Sample[]
+    31→  hardware: { device: string; threads: number }
+    32→}
+    33→interface Verified { date: string; pytest: string; forex: string; packages_ok: string; torch: string; transformers: string }
+    34→interface Repo { url: string; commit: string; exists: boolean }
+    35→interface SysInfo { platform: string; arch: string; cpus: number; ram_gb: number; node: string }
+    36→interface ApiData {
+    37→  progress: Progress | null; results: Results | null; verified: Verified | null
+    38→  goldProgress: GoldProgress | null; goldResults: GoldResults | null
+    39→  repo: Repo | null; sys: SysInfo | null; ts: number
+    40→}
+    41→interface GoldProgress {
+    42→  stage?: string; status?: string; detail?: string
+    43→  train_n?: number; test_n?: number
+    44→  step?: number; loss?: number; elapsed_s?: number
+    45→  base_acc_on_gold?: number
+    46→  adapter_mb?: number
+    47→  acc_base?: number; acc_general?: number; acc_gold?: number
+    48→}
+    49→interface GoldResults {
+    50→  base_model: string; keywords: string
+    51→  train_n: number; test_n: number; label_dist: Record<string, number>
+    52→  training: { steps: number; effective_batch: number; lr: number; seconds: number; loss_curve: number[] }
+    53→  eval: { n: number; acc_base: number; acc_general: number; acc_gold: number }
+    54→  samples: { input: string; gold: string; pred: string; ok: boolean }[]
+    55→  adapter: { saved: boolean; dir: string; size_mb: number }
+    56→  price: { symbol: string; currency: string; latest: number; prev: number | null; series: number[] } | null
+    57→}
+    58→interface PredResult { pred: string; raw?: string; latency_ms: number; adapter?: string; pred_general?: string }
+    59→
+    60→const EXAMPLES = [
+    61→  { label: 'أرباح تتخطى التوقعات', text: 'Apple beats earnings expectations and raises full-year guidance.' },
+    62→  { label: 'استدعاء سيارات تيسلا', text: 'Tesla is recalling 2,700 Model X SUVs due to a steering defect.' },
+    63→  { label: 'خبر عن الذهب', text: 'Gold prices surge to a record high as central banks keep buying bullion.' },
+    64→]
+    65→
+    66→function predBadge(p?: string): string {
+    67→  if (p === 'positive') return 'bg-emerald-600 text-white'
+    68→  if (p === 'negative') return 'bg-red-500 text-white'
+    69→  return 'bg-neutral-500 text-white'
+    70→}
+    71→function predLabel(p?: string): string {
+    72→  if (p === 'positive') return 'إيجابي positive'
+    73→  if (p === 'negative') return 'سلبي negative'
+    74→  if (p === 'neutral') return 'محايد neutral'
+    75→  return p || '—'
+    76→}
+    77→
+    78→const STEPS = [
+    79→  { key: 'download_data', label: 'تحميل بيانات FinGPT (sentiment-train + sentiment-cls)' },
+    80→  { key: 'load_model', label: 'تحميل النموذج الأساسي + محوّل LoRA' },
+    81→  { key: 'baseline_eval', label: 'تقييم أساسي قبل الضبط الدقيق' },
+    82→  { key: 'training', label: 'تدريب LoRA على بيانات المشاعر المالية' },
+    83→  { key: 'export_adapter', label: 'تصدير أوزان LoRA لخدمة الاستدلال الحيّ' },
+    84→  { key: 'finetuned_eval', label: 'تقييم نهائي بعد الضبط الدقيق' },
+    85→]
+    86→
+    87→const GOLD_STEPS = [
+    88→  { key: 'filter_data', label: 'تصفية أخبار الذهب من بيانات FinGPT (gold / XAU / GLD / GDX / bullion)' },
+    89→  { key: 'load_model', label: 'تحميل النموذج الأساسي + محوّل LoRA جديد' },
+    90→  { key: 'gold_training', label: 'تدريب محوّل الذهب على أسطر الذهب فقط' },
+    91→  { key: 'save_adapter', label: 'حفظ محوّل الذهب (adapter_gold)' },
+    92→  { key: 'eval_gold', label: 'مقارنة ثلاثية على أخبار الذهب: أساسي × عام × ذهب' },
+    93→  { key: 'gold_price', label: 'جلب سعر الذهب الحقيقي (عقود COMEX)' },
+    94→]
+    95→
+    96→function fmtParams(n?: number): string {
+    97→  if (!n) return '—'
+    98→  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B'
+    99→  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M'
+   100→  return String(n)
+   101→}
+   102→function pct(a?: number): string {
+   103→  return a != null ? (a * 100).toFixed(1) + '%' : '—'
+   104→}
+   105→
+   106→function StageIcon({ state }: { state: 'running' | 'done' | 'pending' | 'error' }) {
+   107→  if (state === 'done') return <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-600" />
+   108→  if (state === 'running') return <Loader2 className="h-5 w-5 shrink-0 animate-spin text-amber-500" />
+   109→  if (state === 'error') return <XCircle className="h-5 w-5 shrink-0 text-red-500" />
+   110→  return <Circle className="h-5 w-5 shrink-0 text-neutral-300" />
+   111→}
+   112→
+   113→function Bar({ label, value, color }: { label: string; value: number; color: string }) {
+   114→  return (
+   115→    <div>
+   116→      <div className="mb-1 flex items-center justify-between text-sm">
+   117→        <span className="text-neutral-600">{label}</span>
+   118→        <span className="font-semibold">{pct(value)}</span>
+   119→      </div>
+   120→      <div className="h-3 w-full overflow-hidden rounded-full bg-neutral-200">
+   121→        <div className={`h-full rounded-full transition-all duration-700 ${color}`} style={{ width: `${Math.max(2, value * 100)}%` }} />
+   122→      </div>
+   123→    </div>
+   124→  )
+   125→}
+   126→
+   127→function PriceSpark({ series }: { series: number[] }) {
+   128→  if (!series || series.length < 2) return null
+   129→  const pts = series.filter((_, i) => i % Math.max(1, Math.ceil(series.length / 50)) === 0 || i === series.length - 1)
+   130→  const max = Math.max(...pts), min = Math.min(...pts)
+   131→  const rng = max - min || 1
+   132→  const coords = pts.map((v, i) => `${(i / (pts.length - 1)) * 100},${28 - ((v - min) / rng) * 24}`).join(' ')
+   133→  const up = pts[pts.length - 1] >= pts[0]
+   134→  return (
+   135→    <svg viewBox="0 0 100 30" preserveAspectRatio="none" className="h-24 w-full rounded-md bg-neutral-50" role="img" aria-label="سعر الذهب">
+   136→      <polyline points={coords} fill="none" stroke={up ? '#d97706' : '#dc2626'} strokeWidth="1.2" vectorEffect="non-scaling-stroke" />
+   137→    </svg>
+   138→  )
+   139→}
+   140→
+   141→function LossCurve({ curve }: { curve: number[] }) {
+   142→  if (!curve || curve.length < 2) return null
+   143→  const pts = curve.filter((_, i) => i % Math.max(1, Math.ceil(curve.length / 40)) === 0 || i === curve.length - 1)
+   144→  const max = Math.max(...pts), min = Math.min(...pts)
+   145→  const rng = max - min || 1
+   146→  const coords = pts.map((v, i) => `${(i / (pts.length - 1)) * 100},${28 - ((v - min) / rng) * 24}`).join(' ')
+   147→  return (
+   148→    <div>
+   149→      <div className="mb-2 flex items-center gap-2 text-sm text-neutral-600">
+   150→        <TrendingUp className="h-4 w-4" /> منحنى خسارة التدريب
+   151→      </div>
+   152→      <svg viewBox="0 0 100 30" preserveAspectRatio="none" className="h-24 w-full rounded-md bg-neutral-50" role="img" aria-label="منحنى الخسارة">
+   153→        <polyline points={coords} fill="none" stroke="#059669" strokeWidth="1.2" vectorEffect="non-scaling-stroke" />
+   154→      </svg>
+   155→      <div className="mt-1 flex justify-between text-xs text-neutral-400">
+   156→        <span>البداية: {pts[0].toFixed(3)}</span>
+   157→        <span>النهاية: {pts[pts.length - 1].toFixed(3)}</span>
+   158→      </div>
+   159→    </div>
+   160→  )
+   161→}
+   162→
+   163→export default function Home() {
+   164→  const [data, setData] = useState<ApiData | null>(null)
+   165→  const [text, setText] = useState('')
+   166→  const [pred, setPred] = useState<PredResult | null>(null)
+   167→  const [predBusy, setPredBusy] = useState(false)
+   168→  const [predErr, setPredErr] = useState('')
+   169→  const [modelSel, setModelSel] = useState<'general' | 'gold'>('general')
+   170→
+   171→  const runPredict = useCallback(async (t: string, model: 'general' | 'gold' = 'general') => {
+   172→    const input = t.trim()
+   173→    if (!input) return
+   174→    setPredBusy(true); setPredErr(''); setPred(null)
+   175→    try {
+   176→      const r = await fetch('/api/fingpt/predict', {
+   177→        method: 'POST',
+   178→        headers: { 'Content-Type': 'application/json' },
+   179→        body: JSON.stringify({ text: input, model }),
+   180→      })
+   181→      const j = await r.json()
+   182→      if (!r.ok) setPredErr(j?.error || 'فشل التحليل')
+   183→      else setPred(j)
+   184→    } catch { setPredErr('تعذّر الاتصال بالخادم') }
+   185→    finally { setPredBusy(false) }
+   186→  }, [])
+   187→
+   188→  const load = useCallback(async () => {
+   189→    try {
+   190→      const r = await fetch('/api/fingpt', { cache: 'no-store' })
+   191→      setData(await r.json())
+   192→    } catch { /* retry on next tick */ }
+   193→  }, [])
+   194→
+   195→  useEffect(() => {
+   196→    const t = setTimeout(load, 0)
+   197→    const id = setInterval(load, 4000)
+   198→    return () => { clearTimeout(t); clearInterval(id) }
+   199→  }, [load])
+   200→
+   201→  const p = data?.progress ?? null
+   202→  const res = data?.results ?? null
+   203→  const gp = data?.goldProgress ?? null
+   204→  const gr = data?.goldResults ?? null
+   205→  const stageIdx = STEPS.findIndex(s => s.key === p?.stage)
+   206→  const errored = p?.stage === 'error'
+   207→  const gStageIdx = GOLD_STEPS.findIndex(s => s.key === gp?.stage)
+   208→  const gErrored = gp?.stage === 'error'
+   209→
+   210→  return (
+   211→    <div dir="rtl" className="flex min-h-screen flex-col bg-white text-neutral-900">
+   212→      <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-6 sm:px-6">
+   213→        {/* Header */}
+   214→        <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
+   215→          <div className="flex items-center gap-3">
+   216→            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-600 text-white">
+   217→              <BrainCircuit className="h-6 w-6" />
+   218→            </div>
+   219→            <div>
+   220→              <h1 className="text-xl font-bold sm:text-2xl">FinGPT — لوحة التشغيل الحيّة</h1>
+   221→              <p className="text-sm text-neutral-500">النموذج المالي مفتوح المصدر يعمل الآن في بيئتي (CPU فقط)</p>
+   222→            </div>
+   223→          </div>
+   224→          <div className="flex items-center gap-2">
+   225→            <Badge variant="outline" className="gap-1 border-emerald-300 bg-emerald-50 text-emerald-700">
+   226→              <Activity className="h-3 w-3" /> تحديث تلقائي كل 4 ثوانٍ
+   227→            </Badge>
+   228→            <Button variant="outline" size="sm" onClick={() => load()} aria-label="تحديث الآن">
+   229→              <RefreshCw className="h-4 w-4" /> تحديث
+   230→            </Button>
+   231→          </div>
+   232→        </header>
+   233→
+   234→        {/* Env cards */}
+   235→        <section aria-label="حالة البيئة" className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+   236→          <Card>
+   237→            <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><GitBranch className="h-4 w-4 text-emerald-600" /> المستودع</CardTitle></CardHeader>
+   238→            <CardContent className="text-sm text-neutral-600">
+   239→              <p className="break-all">AI4Finance-Foundation/FinGPT</p>
+   240→              <p className="mt-1 break-all font-mono text-xs text-neutral-400">{data?.repo?.commit || '—'}</p>
+   241→              <p className="mt-2">استنساخ كامل: <Badge className="bg-emerald-600 text-xs text-white">{data?.repo?.exists ? 'نعم' : 'لا'}</Badge></p>
+   242→            </CardContent>
+   243→          </Card>
+   244→          <Card>
+   245→            <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Server className="h-4 w-4 text-emerald-600" /> بيئة التشغيل</CardTitle></CardHeader>
+   246→            <CardContent className="text-sm text-neutral-600">
+   247→              <p>المعالج: {data?.sys?.cpus ?? '—'} أنوية ({data?.sys?.platform ?? '—'})</p>
+   248→              <p>الذاكرة: {data?.sys?.ram_gb ?? '—'} GB — بدون GPU</p>
+   249→              <p className="mt-1 font-mono text-xs text-neutral-400">torch {data?.verified?.torch || '—'} · transformers {data?.verified?.transformers || '—'}</p>
+   250→            </CardContent>
+   251→          </Card>
+   252→          <Card>
+   253→            <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><FlaskConical className="h-4 w-4 text-emerald-600" /> اختبارات المستودع</CardTitle></CardHeader>
+   254→            <CardContent className="space-y-1 text-sm text-neutral-600">
+   255→              <p>{data?.verified?.pytest || 'قيد التحقق…'}</p>
+   256→              <p>Forex: {data?.verified?.forex || '…'}</p>
+   257→              <p className="text-xs">{data?.verified?.packages_ok || ''}</p>
+   258→            </CardContent>
+   259→          </Card>
+   260→        </section>
+   261→
+   262→        <Separator className="mb-6" />
+   263→
+   264→        {/* Pipeline */}
+   265→        <section aria-label="مسار التشغيل" className="mb-6">
+   266→          <h2 className="mb-3 flex items-center gap-2 text-lg font-bold"><Database className="h-5 w-5 text-emerald-600" /> مسار التشغيل الحيّ — ضبط LoRA على بيانات المشاعر المالية</h2>
+   267→          <Card>
+   268→            <CardContent className="p-4 sm:p-6">
+   269→              {!p && <p className="text-sm text-neutral-500">في انتظار أول قراءة من عملية التشغيل…</p>}
+   270→              {p && (
+   271→                <ol className="space-y-4">
+   272→                  {STEPS.map((s, i) => {
+   273→                    const state: 'running' | 'done' | 'pending' | 'error' =
+   274→                      errored && i === stageIdx ? 'error'
+   275→                        : errored && i < stageIdx ? 'done'
+   276→                        : i < stageIdx || p.stage === 'done' ? 'done'
+   277→                        : i === stageIdx ? (p.status === 'done' ? 'done' : 'running')
+   278→                        : 'pending'
+   279→                    return (
+   280→                      <li key={s.key} className="flex items-start gap-3">
+   281→                        <StageIcon state={state} />
+   282→                        <div className="min-w-0 flex-1">
+   283→                          <p className={`text-sm font-medium ${state === 'pending' ? 'text-neutral-400' : ''}`}>{s.label}</p>
+   284→                          {s.key === 'download_data' && p.train_n != null && (
+   285→                            <p className="text-xs text-neutral-500">{p.train_n} مثال تدريب · {p.test_n} مثال تقييم (HuggingFace: FinGPT)</p>
+   286→                          )}
+   287→                          {s.key === 'load_model' && p.trainable_params != null && (
+   288→                            <p className="text-xs text-neutral-500">النموذج: Qwen2.5-0.5B-Instruct · معاملات قابلة للتدريب: {fmtParams(p.trainable_params)} من {fmtParams(p.total_params)}</p>
+   289→                          )}
+   290→                          {s.key === 'baseline_eval' && p.acc_baseline != null && (
+   291→                            <p className="text-xs text-neutral-500">الدقة قبل الضبط: <b>{pct(p.acc_baseline)}</b></p>
+   292→                          )}
+   293→                          {s.key === 'training' && state === 'running' && p.step != null && (
+   294→                            <p className="text-xs text-neutral-500">الخطوة {p.step} · الخسارة {p.loss ?? '—'} · {p.elapsed_s ?? 0} ثانية</p>
+   295→                          )}
+   296→                          {s.key === 'training' && state === 'done' && (
+   297→                            <p className="text-xs text-neutral-500">انتهى التدريب · الخسارة النهائية {p.loss ?? '—'}</p>
+   298→                          )}
+   299→                          {s.key === 'export_adapter' && state === 'done' && p.adapter_mb != null && (
+   300→                            <p className="text-xs text-neutral-500">حُفظت الأوزان ({p.adapter_mb} MB · {p.adapter_files} ملفات) في <span dir="ltr" className="font-mono">fingpt_run/adapter</span></p>
+   301→                          )}
+   302→                          {s.key === 'finetuned_eval' && p.acc_final != null && (
+   303→                            <p className="text-xs text-neutral-500">الدقة بعد الضبط: <b className="text-emerald-700">{pct(p.acc_final)}</b></p>
+   304→                          )}
+   305→                          {errored && s.key === p.stage && (
+   306→                            <p className="mt-1 break-all rounded bg-red-50 p-2 font-mono text-xs text-red-600">{p.detail}</p>
+   307→                          )}
+   308→                        </div>
+   309→                      </li>
+   310→                    )
+   311→                  })}
+   312→                </ol>
+   313→              )}
+   314→            </CardContent>
+   315→          </Card>
+   316→        </section>
+   317→
+   318→        {/* Results */}
+   319→        <section aria-label="النتائج" className="mb-6">
+   320→          <h2 className="mb-3 text-lg font-bold">النتائج النهائية</h2>
+   321→          {!res && (
+   322→            <Card><CardContent className="p-6 text-sm text-neutral-500">
+   323→              جارٍ تنفيذ خطوات التشغيل… ستظهر النتائج هنا تلقائياً عند اكتمالها.
+   324→            </CardContent></Card>
+   325→          )}
+   326→          {res && (
+   327→            <div className="grid gap-4 lg:grid-cols-2">
+   328→              <Card>
+   329→                <CardHeader className="pb-2"><CardTitle className="text-base">دقة تصنيف المشاعر (اختبار {res.eval.n} مثالاً)</CardTitle></CardHeader>
+   330→                <CardContent className="space-y-4">
+   331→                  <Bar label="قبل الضبط الدقيق (نموذج أساسي عام)" value={res.eval.acc_before} color="bg-amber-400" />
+   332→                  <Bar label="بعد ضبط LoRA ببيانات FinGPT" value={res.eval.acc_after} color="bg-emerald-600" />
+   333→                  <p className="text-xs text-neutral-500">
+   334→                    قالب التعليمات الرسمي من FinGPT_Benchmark: <span dir="ltr" className="font-mono">Instruction / Input / Answer</span>
+   335→                  </p>
+   336→                </CardContent>
+   337→              </Card>
+   338→              <Card>
+   339→                <CardHeader className="pb-2"><CardTitle className="text-base">تفاصيل الضبط الدقيق</CardTitle></CardHeader>
+   340→                <CardContent className="space-y-3 text-sm text-neutral-600">
+   341→                  <LossCurve curve={res.training.loss_curve} />
+   342→                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+   343→                    <span>خطوات التدريب: <b>{res.training.steps}</b></span>
+   344→                    <span>حزمة فعّالة: <b>{res.training.effective_batch}</b></span>
+   345→                    <span>معدل التعلم: <b dir="ltr">{res.training.lr}</b></span>
+   346→                    <span>مدة التدريب: <b>{res.training.seconds} ث</b></span>
+   347→                    <span>مصفوفات LoRA: <b dir="ltr">r={res.lora.r}, α={res.lora.alpha}</b></span>
+   348→                    <span>الأهداف: <b dir="ltr">q/k/v_proj</b></span>
+   349→                  </div>
+   350→                </CardContent>
+   351→              </Card>
+   352→              <Card className="lg:col-span-2">
+   353→                <CardHeader className="pb-2"><CardTitle className="text-base">أمثلة تنبؤات النموذج بعد الضبط</CardTitle></CardHeader>
+   354→                <CardContent>
+   355→                  <div className="max-h-96 overflow-y-auto rounded-md border">
+   356→                    <table className="w-full text-right text-xs sm:text-sm">
+   357→                      <thead className="sticky top-0 bg-neutral-100 text-neutral-600">
+   358→                        <tr>
+   359→                          <th className="p-2 font-medium">النص المالي</th>
+   360→                          <th className="p-2 font-medium">التصنيف الصحيح</th>
+   361→                          <th className="p-2 font-medium">تنبؤ النموذج</th>
+   362→                          <th className="p-2 font-medium">✓</th>
+   363→                        </tr>
+   364→                      </thead>
+   365→                      <tbody>
+   366→                        {res.samples_after.map((s, i) => (
+   367→                          <tr key={i} className="border-t">
+   368→                            <td className="p-2 text-neutral-700" dir="auto">{s.input}</td>
+   369→                            <td className="p-2">{s.gold}</td>
+   370→                            <td className="p-2" dir="auto">{s.pred}</td>
+   371→                            <td className={`p-2 font-bold ${s.ok ? 'text-emerald-600' : 'text-red-500'}`}>{s.ok ? '✓' : '✗'}</td>
+   372→                          </tr>
+   373→                        ))}
+   374→                      </tbody>
+   375→                    </table>
+   376→                  </div>
+   377→                </CardContent>
+   378→              </Card>
+   379→            </div>
+   380→          )}
+   381→        </section>
+   382→
+   383→        {/* Gold specialization */}
+   384→        <section aria-label="تخصص الذهب" className="mb-6">
+   385→          <h2 className="mb-3 flex items-center gap-2 text-lg font-bold">
+   386→            <Coins className="h-5 w-5 text-amber-500" /> تخصص الذهب — محوّل LoRA مدرَّب على أخبار الذهب فقط
+   387→          </h2>
+   388→          {!gp && !gr && (
+   389→            <Card><CardContent className="p-6 text-sm text-neutral-500">لم يبدأ تشغيل تخصص الذهب بعد.</CardContent></Card>
+   390→          )}
+   391→          {gp && gp.stage !== 'done' && (
+   392→            <Card>
+   393→              <CardContent className="p-4 sm:p-6">
+   394→                <ol className="space-y-4">
+   395→                  {GOLD_STEPS.map((s, i) => {
+   396→                    const state: 'running' | 'done' | 'pending' | 'error' =
+   397→                      gErrored && i === gStageIdx ? 'error'
+   398→                        : gErrored && i < gStageIdx ? 'done'
+   399→                        : i < gStageIdx || gp.stage === 'done' ? 'done'
+   400→                        : i === gStageIdx ? (gp.status === 'done' ? 'done' : 'running')
+   401→                        : 'pending'
+   402→                    return (
+   403→                      <li key={s.key} className="flex items-start gap-3">
+   404→                        <StageIcon state={state} />
+   405→                        <div className="min-w-0 flex-1">
+   406→                          <p className={`text-sm font-medium ${state === 'pending' ? 'text-neutral-400' : ''}`}>{s.label}</p>
+   407→                          {s.key === 'filter_data' && gp.train_n != null && (
+   408→                            <p className="text-xs text-neutral-500">{gp.train_n} سطراً تدريباً · {gp.test_n} للتقييم (كلمات: {gp.keywords})</p>
+   409→                          )}
+   410→                          {s.key === 'gold_training' && state === 'running' && gp.step != null && (
+   411→                            <p className="text-xs text-neutral-500">الخطوة {gp.step} · الخسارة {gp.loss ?? '—'} · {gp.elapsed_s ?? 0} ثانية · دقة الأساس على الذهب: {pct(gp.base_acc_on_gold)}</p>
+   412→                          )}
+   413→                          {s.key === 'save_adapter' && state === 'done' && gp.adapter_mb != null && (
+   414→                            <p className="text-xs text-neutral-500">حُفظ المحوّل ({gp.adapter_mb} MB) في <span dir="ltr" className="font-mono">fingpt_run/adapter_gold</span></p>
+   415→                          )}
+   416→                          {s.key === 'eval_gold' && state === 'done' && (
+   417→                            <p className="text-xs text-neutral-500">ذهب: <b>{pct(gp.acc_gold)}</b> · عام: <b>{pct(gp.acc_general)}</b> · أساسي: <b>{pct(gp.acc_base)}</b></p>
+   418→                          )}
+   419→                          {gErrored && s.key === gp.stage && (
+   420→                            <p className="mt-1 break-all rounded bg-red-50 p-2 font-mono text-xs text-red-600">{gp.detail}</p>
+   421→                          )}
+   422→                        </div>
+   423→                      </li>
+   424→                    )
+   425→                  })}
+   426→                </ol>
+   427→              </CardContent>
+   428→            </Card>
+   429→          )}
+   430→          {gr && (
+   431→            <div className="grid gap-4 lg:grid-cols-2">
+   432→              <Card>
+   433→                <CardHeader className="pb-2"><CardTitle className="text-base">دقة تصنيف أخبار الذهب ({gr.eval.n} مثالاً)</CardTitle></CardHeader>
+   434→                <CardContent className="space-y-4">
+   435→                  <Bar label="النموذج الأساسي (بدون ضبط)" value={gr.eval.acc_base} color="bg-neutral-400" />
+   436→                  <Bar label="النموذج العام (بيانات FinGPT الكاملة)" value={gr.eval.acc_general} color="bg-amber-400" />
+   437→                  <Bar label="نموذج الذهب (محوّل متخصص)" value={gr.eval.acc_gold} color="bg-yellow-500" />
+   438→                  <p className="text-xs text-neutral-500">
+   439→                    تدريب على {gr.train_n} سطراً عن الذهب ({gr.keywords}) · محوّل {gr.adapter.size_mb} MB · تصنيفات الاختبار: {Object.entries(gr.label_dist).map(([k, v]) => `${k}=${v}`).join('، ')}
+   440→                  </p>
+   441→                </CardContent>
+   442→              </Card>
+   443→              <Card>
+   444→                <CardHeader className="pb-2"><CardTitle className="text-base">سعر الذهب الحقيقي — عقود GC=F (3 أشهر)</CardTitle></CardHeader>
+   445→                <CardContent>
+   446→                  {gr.price ? (
+   447→                    <>
+   448→                      <div className="mb-2 flex flex-wrap items-center gap-2">
+   449→                        <span className="text-2xl font-bold">${gr.price.latest.toLocaleString('en-US')}</span>
+   450→                        {gr.price.prev != null && (
+   451→                          <Badge className={gr.price.latest >= gr.price.prev ? 'bg-emerald-600 text-white' : 'bg-red-500 text-white'}>
+   452→                            {(gr.price.latest - gr.price.prev >= 0 ? '+' : '') + (gr.price.latest - gr.price.prev).toFixed(1)} $
+   453→                          </Badge>
+   454→                        )}
+   455→                        <span className="text-xs text-neutral-400" dir="ltr">{gr.price.symbol} · USD/oz · Yahoo Finance</span>
+   456→                      </div>
+   457→                      <PriceSpark series={gr.price.series} />
+   458→                    </>
+   459→                  ) : (
+   460→                    <p className="text-sm text-neutral-500">تعذّر جلب السعر الآن.</p>
+   461→                  )}
+   462→                </CardContent>
+   463→              </Card>
+   464→            </div>
+   465→          )}
+   466→        </section>
+   467→
+   468→        {/* Live experiment */}
+   469→        <section aria-label="تجربة حية" className="mb-6">
+   470→          <h2 className="mb-3 flex items-center gap-2 text-lg font-bold">
+   471→            <Sparkles className="h-5 w-5 text-emerald-600" /> تجربة حيّة — جرّب النموذج المدرَّب بنفسك
+   472→          </h2>
+   473→          <Card>
+   474→            <CardContent className="space-y-3 p-4 sm:p-6">
+   475→              <p className="text-sm text-neutral-600">
+   476→                اكتب خبراً أو تغريدة مالية (بالإنجليزية — النموذج مدرَّب على نصوص FinGPT الإنجليزية) وسيلخّصها إلى مشاعر:
+   477→              </p>
+   478→              <div className="flex flex-wrap items-center gap-2">
+   479→                <span className="text-sm text-neutral-600">المحوّل المستخدم:</span>
+   480→                <button
+   481→                  onClick={() => setModelSel('general')}
+   482→                  disabled={predBusy}
+   483→                  className={`rounded-full px-3 py-1 text-xs transition-colors disabled:opacity-50 ${modelSel === 'general' ? 'bg-emerald-600 text-white' : 'border text-neutral-600 hover:bg-neutral-100'}`}
+   484→                >
+   485→                  النموذج العام
+   486→                </button>
+   487→                <button
+   488→                  onClick={() => setModelSel('gold')}
+   489→                  disabled={predBusy || !gr}
+   490→                  title={!gr ? 'انتظر اكتمال تدريب محوّل الذهب' : 'مقارنة نموذج الذهب مع العام'}
+   491→                  className={`rounded-full px-3 py-1 text-xs transition-colors disabled:opacity-50 ${modelSel === 'gold' ? 'bg-amber-500 text-white' : 'border text-neutral-600 hover:bg-neutral-100'}`}
+   492→                >
+   493→                  نموذج الذهب — مع مقارنة
+   494→                </button>
+   495→              </div>
+   496→              <Textarea
+   497→                dir="auto" rows={3} value={text}
+   498→                onChange={(e) => setText(e.target.value)}
+   499→                placeholder="مثال: Apple beats earnings expectations and raises full-year guidance…"
+   500→              />
+   501→              <div className="flex flex-wrap items-center gap-2">
+   502→                <Button
+   503→                  onClick={() => runPredict(text, modelSel)}
+   504→                  disabled={predBusy || !text.trim()}
+   505→                  className="bg-emerald-600 text-white hover:bg-emerald-700"
+   506→                >
+   507→                  {predBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+   508→                  {predBusy ? 'جارٍ التحليل…' : 'حلّل المشاعر'}
+   509→                </Button>
+   510→                {EXAMPLES.map((ex) => (
+   511→                  <button
+   512→                    key={ex.label}
+   513→                    onClick={() => { setText(ex.text); runPredict(ex.text, modelSel) }}
+   514→                    disabled={predBusy}
+   515→                    className="rounded-full border px-3 py-1 text-xs text-neutral-600 transition-colors hover:bg-neutral-100 disabled:opacity-50"
+   516→                  >
+   517→                    {ex.label}
+   518→                  </button>
+   519→                ))}
+   520→              </div>
+   521→              <p className="text-xs text-neutral-400">
+   522→                أول تحليل قد يستغرق حتى دقيقة (تحميل النموذج على CPU) — التحليلات التالية تُعاد خلال ثوانٍ.
+   523→              </p>
+   524→              {predErr && (
+   525→                <p className="rounded-md bg-red-50 p-3 text-sm text-red-600">{predErr}</p>
+   526→              )}
+   527→              {pred && (
+   528→                <div className="rounded-md border p-3">
+   529→                  <div className="flex flex-wrap items-center gap-2">
+   530→                    <span className="text-sm text-neutral-600">التصنيف:</span>
+   531→                    {modelSel === 'gold' && pred.pred_general ? (
+   532→                      <>
+   533→                        <Badge className={predBadge(pred.pred)}>ذهب: {predLabel(pred.pred)}</Badge>
+   534→                        <span className="text-xs text-neutral-400">مقابل العام:</span>
+   535→                        <Badge className={predBadge(pred.pred_general)}>{predLabel(pred.pred_general)}</Badge>
+   536→                      </>
+   537→                    ) : (
+   538→                      <Badge className={predBadge(pred.pred)}>{predLabel(pred.pred)}</Badge>
+   539→                    )}
+   540→                    <span className="text-xs text-neutral-400">
+   541→                      {pred.latency_ms} ms · المحوّل: {pred.adapter === 'gold' ? 'نموذج الذهب المتخصص' : 'نموذج FinGPT العام (LoRA)'}
+   542→                    </span>
+   543→                  </div>
+   544→                  {pred.raw && (
+   545→                    <p className="mt-2 break-all font-mono text-xs text-neutral-400" dir="ltr">raw: {pred.raw}</p>
+   546→                  )}
+   547→                </div>
+   548→              )}
+   549→            </CardContent>
+   550→          </Card>
+   551→        </section>
+   552→      </main>
+   553→
+   554→      <footer className="mt-auto border-t bg-neutral-50 py-3 text-center text-xs text-neutral-500">
+   555→        FinGPT (AI4Finance-Foundation) يعمل في بيئة معزولة — CPU فقط · آخر تحديث: <span dir="ltr">{data ? new Date(data.ts).toLocaleTimeString('ar-EG') : '—'}</span>
+   556→      </footer>
+   557→    </div>
+   558→  )
+   559→}
+   560→
