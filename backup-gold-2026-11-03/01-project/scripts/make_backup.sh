@@ -29,7 +29,10 @@ rsync -a "$SRC/download/design-theme-kit"   "$BK/02-packages/" 2>/dev/null || ec
 rsync -a "$SRC/download/yemen-smart-gold"   "$BK/02-packages/" 2>/dev/null || echo "   (yemen-smart-gold غير موجود — تخطي)"
 
 echo "==> 3) النموذج والمحوّلات (FinGPT بدون .git + fingpt_run)"
-rsync -a --exclude '.git' "$SRC/FinGPT"     "$BK/03-model/" 2>/dev/null || echo "   (FinGPT غير موجود — تخطي)"
+rsync -a --exclude '.git' \
+  --exclude 'FinGPT_MultiAgentsRAG/Fine_tune_model/fine_tune_Llama2.ipynb' \
+  --exclude 'FinGPT_MultiAgentsRAG/Fine_tune_model/fine_tune_GLM2.ipynb' \
+  "$SRC/FinGPT" "$BK/03-model/" 2>/dev/null || echo "   (FinGPT غير موجود — تخطي)"
 rsync -a "$SRC/fingpt_run"                  "$BK/03-model/" 2>/dev/null || echo "   (fingpt_run غير موجود — تخطي)"
 
 echo "==> الأحجام:"

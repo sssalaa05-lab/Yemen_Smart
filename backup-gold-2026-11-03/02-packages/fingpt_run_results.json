@@ -1,0 +1,221 @@
+{
+  "base_model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "lora": {
+    "r": 8,
+    "alpha": 16,
+    "targets": [
+      "q_proj",
+      "k_proj",
+      "v_proj"
+    ],
+    "trainable_params": 737280,
+    "total_params": 494770048
+  },
+  "adapter": {
+    "saved": true,
+    "dir": "/home/z/my-project/fingpt_run/adapter",
+    "files": 6,
+    "size_mb": 13.73,
+    "instruction": "What is the sentiment of this news? Please choose from: negative / neutral / positive."
+  },
+  "template": "Instruction: {instruction}\nInput: {input}\nAnswer: ",
+  "datasets": {
+    "train": "FinGPT/fingpt-sentiment-train[:600]",
+    "test": "FinGPT/fingpt-sentiment-cls[:40]"
+  },
+  "training": {
+    "steps": 78,
+    "effective_batch": 4,
+    "lr": 0.0002,
+    "seconds": 250,
+    "loss_curve": [
+      9.8498,
+      8.8463,
+      9.0911,
+      8.1287,
+      6.6459,
+      5.5304,
+      5.9014,
+      6.2646,
+      5.4407,
+      5.2328,
+      3.663,
+      3.2626,
+      3.5565,
+      2.6569,
+      1.3173,
+      1.2867,
+      3.1936,
+      0.7423,
+      1.1469,
+      2.0763,
+      1.2588,
+      0.857,
+      0.5489,
+      1.1783,
+      0.6895,
+      0.4961,
+      1.0166,
+      0.1968,
+      0.3651,
+      1.6561,
+      0.4215,
+      1.2824,
+      0.1849,
+      0.3775,
+      0.3851,
+      0.5314,
+      0.4085,
+      0.5908,
+      0.2799,
+      0.8688,
+      0.2544,
+      1.0425,
+      0.3521,
+      0.3753,
+      0.6079,
+      0.2514,
+      0.2324,
+      0.6268,
+      0.62,
+      0.3256,
+      0.1719,
+      0.4979,
+      0.494,
+      0.4647,
+      0.4507,
+      0.4777,
+      0.0657,
+      0.2916,
+      0.5534,
+      0.4944,
+      0.3975,
+      0.6891,
+      0.2074,
+      0.2422,
+      0.4406,
+      0.5689,
+      0.6784,
+      0.141,
+      0.8368,
+      0.334,
+      0.7101,
+      0.4448,
+      0.298,
+      0.2634,
+      0.289,
+      0.1534,
+      0.1697,
+      0.2746
+    ]
+  },
+  "eval": {
+    "n": 30,
+    "acc_before": 0.5333,
+    "acc_after": 0.8667
+  },
+  "samples_before": [
+    {
+      "input": "@harmongreg: $BBRY wkly, Inverse Head and Shoulders forming, triggers over 18.50, PO at least 30.80, watching ",
+      "gold": "positive",
+      "pred": "1. Negative\n\nThe",
+      "ok": false
+    },
+    {
+      "input": "Dating apps maker Match Group on Friday (May 20) withdrew its request for a temporary restraining order agains",
+      "gold": "positive",
+      "pred": "1\nSentiment analysis",
+      "ok": false
+    },
+    {
+      "input": "Apple will soon allow iPhone users to unlock, sign in and pay with their faces even if they're wearing a mask.",
+      "gold": "positive",
+      "pred": "1. Negative\n\nThe",
+      "ok": false
+    },
+    {
+      "input": "#NDX component Tesla has announced it is recalling 2700 Model X SUVs. $TSLA",
+      "gold": "negative",
+      "pred": "1. Negative\n\nThe",
+      "ok": true
+    },
+    {
+      "input": "Big gains from Apple, Microsoft, and others helped catapult the S&P 500 to new heights.",
+      "gold": "positive",
+      "pred": "1. Positive\n\nThe",
+      "ok": true
+    },
+    {
+      "input": "Both operating profit and net sales for the three-month period increased , respectively from EUR15 .1 m and EU",
+      "gold": "positive",
+      "pred": "1. Negative\n\nThe",
+      "ok": false
+    },
+    {
+      "input": "$COST Costco less than stellar day but it held the 50 day moving average",
+      "gold": "negative",
+      "pred": "1. Negative\n\nThe",
+      "ok": true
+    },
+    {
+      "input": "Alphabet stock is suffering from tough year-over-year comparisons, competition from TikTok, and currency headw",
+      "gold": "negative",
+      "pred": "1. The sentiment of",
+      "ok": false
+    }
+  ],
+  "samples_after": [
+    {
+      "input": "@harmongreg: $BBRY wkly, Inverse Head and Shoulders forming, triggers over 18.50, PO at least 30.80, watching ",
+      "gold": "positive",
+      "pred": "positive",
+      "ok": true
+    },
+    {
+      "input": "Dating apps maker Match Group on Friday (May 20) withdrew its request for a temporary restraining order agains",
+      "gold": "positive",
+      "pred": "positive",
+      "ok": true
+    },
+    {
+      "input": "Apple will soon allow iPhone users to unlock, sign in and pay with their faces even if they're wearing a mask.",
+      "gold": "positive",
+      "pred": "positive",
+      "ok": true
+    },
+    {
+      "input": "#NDX component Tesla has announced it is recalling 2700 Model X SUVs. $TSLA",
+      "gold": "negative",
+      "pred": "positive",
+      "ok": false
+    },
+    {
+      "input": "Big gains from Apple, Microsoft, and others helped catapult the S&P 500 to new heights.",
+      "gold": "positive",
+      "pred": "positive",
+      "ok": true
+    },
+    {
+      "input": "Both operating profit and net sales for the three-month period increased , respectively from EUR15 .1 m and EU",
+      "gold": "positive",
+      "pred": "positive",
+      "ok": true
+    },
+    {
+      "input": "$COST Costco less than stellar day but it held the 50 day moving average",
+      "gold": "negative",
+      "pred": "negative",
+      "ok": true
+    },
+    {
+      "input": "Alphabet stock is suffering from tough year-over-year comparisons, competition from TikTok, and currency headw",
+      "gold": "negative",
+      "pred": "positive",
+      "ok": false
+    }
+  ],
+  "hardware": {
+    "device": "cpu",
+    "threads": 2
+  }
+}
